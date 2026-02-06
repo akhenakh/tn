@@ -898,6 +898,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				fullPath := filepath.Join(m.currentDir, filename)
 
+				// Check if file already exists
+				if _, err := os.Stat(fullPath); err == nil {
+					// File exists, show error message and don't create
+					m.textInput.SetValue("")
+					m.textInput.Placeholder = "File already exists! Press Esc to cancel"
+					return m, nil
+				} else if !os.IsNotExist(err) {
+					// Other error occurred
+					log.Printf("Error checking file existence: %v", err)
+				}
+
 				var content []byte
 				if m.pendingTemplate != "" {
 					content, _ = processTemplate(m.pendingTemplate)
