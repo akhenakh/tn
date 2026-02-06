@@ -250,6 +250,21 @@ func sanitizeSnippet(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// Helper to truncate text to a specific width to prevent wrapping
+func truncateText(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if len(s) > width {
+		// Use ellipsis if we have space, otherwise just cut
+		if width > 3 {
+			return s[:width-3] + "..."
+		}
+		return s[:width]
+	}
+	return s
+}
+
 var (
 	docStyle = lipgloss.NewStyle().Margin(1, 2)
 
@@ -398,7 +413,12 @@ func initialModel(cfg Config, db *sql.DB) model {
 	l.DisableQuitKeybindings()
 
 	// Initialize Search List
-	sl := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
+	// Use a delegate with strict height settings to prevent wrapping issues
+	searchDelegate := list.NewDefaultDelegate()
+	searchDelegate.SetHeight(2)  // Title + 1 line description
+	searchDelegate.SetSpacing(1) // Restore spacing for readability
+
+	sl := list.New([]list.Item{}, searchDelegate, 0, 0)
 	sl.Title = "Search Results (Ranked)"
 	sl.SetShowHelp(false)
 	sl.SetFilteringEnabled(false) // We do manual filtering via DB
@@ -570,7 +590,8 @@ func (m model) refreshFileListCmd(dir string) tea.Cmd {
 }
 
 // Performs FTS5 query
-func (m model) searchCmd(query string) tea.Cmd {
+// Accepts width to enforce strict truncation
+func (m model) searchCmd(query string, width int) tea.Cmd {
 	return func() tea.Msg {
 		if query == "" {
 			return searchResultMsg(nil)
@@ -584,8 +605,9 @@ func (m model) searchCmd(query string) tea.Cmd {
 		escapedTerm := strings.ReplaceAll(term, "'", "''")
 
 		// Weighted query: Filename (10), Headers (5), Content (1)
+		// Reduced snippet context to 5 tokens to keep results compact
 		q := fmt.Sprintf(`
-		SELECT path, snippet(search_idx, 3, '>', '<', '...', 10) 
+		SELECT path, snippet(search_idx, 3, '>', '<', '...', 5) 
 		FROM search_idx 
 		WHERE search_idx MATCH '%s' 
 		ORDER BY bm25(search_idx, 10.0, 5.0, 1.0) 
@@ -597,6 +619,13 @@ func (m model) searchCmd(query string) tea.Cmd {
 		}
 		defer rows.Close()
 
+		// Calculate strict text limits based on width to prevent wrapping
+		// We account for list padding/borders (approx 6 chars safety)
+		safeWidth := width - 6
+		if safeWidth < 10 {
+			safeWidth = 10
+		}
+
 		var items []list.Item
 		for rows.Next() {
 			var path, snip string
@@ -607,12 +636,16 @@ func (m model) searchCmd(query string) tea.Cmd {
 			// Clean snippet to avoid UI bugs
 			snip = sanitizeSnippet(snip)
 
-			// Make relative path for display title
+			// Hard truncate snippet (Description)
+			snip = truncateText(snip, safeWidth)
+
+			// Make relative path for display title and truncate it (Title)
 			rel, _ := filepath.Rel(m.config.BaseDoc, path)
+			rel = truncateText(rel, safeWidth)
 
 			items = append(items, item{
 				title: rel,
-				desc:  snip, // Display cleaned snippet
+				desc:  snip,
 				path:  path,
 				isDir: false,
 			})
@@ -852,10 +885,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.templateList.SetSize(msg.Width-4, msg.Height-4)
 
 		// Search list needs less height because of the input box
-		// We allocate generous space for the input box (5 lines approx)
-		// and some safety margin to prevent scrolling the top off.
-		// Total Height - InputBox (~5) - ListBorder(2) - Safety (~5) = Height - 12
-		searchHeight := msg.Height - 12
+		// We calculate this dynamically to ensure the input box is never pushed off screen.
+		// Render a dummy input box to measure its true vertical height with current style.
+		// We use empty string to get minimum height of the input widget style
+		renderedInput := inputStyle.Width(m.inputWidth).Render(m.searchInput.View())
+		inputBoxHeight := lipgloss.Height(renderedInput)
+
+		// Get the vertical frame size (borders/padding) of the list container.
+		listFrameHeight := listStyle.GetVerticalFrameSize()
+
+		// Calculate remaining height for the list component content.
+		// Total Window Height - Input Box Height - List Container Borders
+		// We subtract 1 line to ensure we don't hit the absolute edge of the terminal, causing scroll.
+		searchHeight := msg.Height - inputBoxHeight - listFrameHeight - 1
+
 		if searchHeight < 0 {
 			searchHeight = 0
 		}
@@ -1244,7 +1287,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchInput, cmd = m.searchInput.Update(msg)
 				cmds = append(cmds, cmd)
 				m.searchQuery = m.searchInput.Value()
-				cmds = append(cmds, m.searchCmd(m.searchInput.Value()))
+				// Pass the current calculated list width to the search command to enforce truncation
+				cmds = append(cmds, m.searchCmd(m.searchInput.Value(), m.listWidth))
 				previewCmd := m.updatePreview()
 				if previewCmd != nil {
 					cmds = append(cmds, previewCmd)
@@ -1288,9 +1332,12 @@ func (m model) View() string {
 		// Split view for Search: Search Input+List (Left), Preview (Right)
 		// We strictly control heights to prevent the input from being pushed off-screen.
 		// The list style height must match the content height we calculated in Update.
+		inputView := inputStyle.Width(m.inputWidth).Render(m.searchInput.View())
+		listView := listStyle.Width(m.listWidth).Render(m.searchList.View())
+
 		leftPane := lipgloss.JoinVertical(lipgloss.Left,
-			inputStyle.Width(m.inputWidth).Render(m.searchInput.View()),
-			listStyle.Width(m.listWidth).Height(m.searchListHeight).Render(m.searchList.View()),
+			inputView,
+			listView,
 		)
 		return lipgloss.JoinHorizontal(
 			lipgloss.Top,
