@@ -295,11 +295,6 @@ type previewRenderMsg struct {
 	id      int // To track if this is the most recent render request
 }
 
-// sharedRendererReadyMsg notifies when the shared renderer is initialized
-type sharedRendererReadyMsg struct {
-	renderer *glamour.TermRenderer
-}
-
 type model struct {
 	config Config
 	db     *sql.DB
@@ -315,18 +310,17 @@ type model struct {
 	deleteInput  textinput.Model
 
 	// Logic state
-	currentDir           string
-	selectedFile         string
-	pendingTemplate      string
-	fileToDelete         string // Track file to be deleted
-	width, height        int
-	renderer             *glamour.TermRenderer
-	fileToSelect         string // Track file to select after directory refresh
-	previewLoading       bool   // Track if preview is being rendered
-	renderID             int    // Incremental ID to track current render request
-	rendererInitializing bool   // Track if shared renderer is being created
-	showHelp             bool   // Track if help is being shown
-	searchQuery          string // Current search query for highlighting
+	currentDir      string
+	selectedFile    string
+	pendingTemplate string
+	fileToDelete    string // Track file to be deleted
+	width, height   int
+	viewWidth       int    // Width available for preview/content
+	fileToSelect    string // Track file to select after directory refresh
+	previewLoading  bool   // Track if preview is being rendered
+	renderID        int    // Incremental ID to track current render request
+	showHelp        bool   // Track if help is being shown
+	searchQuery     string // Current search query for highlighting
 }
 
 func initialModel(cfg Config, db *sql.DB) model {
@@ -378,7 +372,6 @@ func initialModel(cfg Config, db *sql.DB) model {
 		searchInput:  si,
 		deleteInput:  di,
 		currentDir:   cfg.BaseDoc,
-		renderer:     nil, // Will be created on first use
 	}
 }
 
@@ -388,7 +381,6 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		textinput.Blink,
 		m.refreshFileListCmd(m.currentDir),
-		m.initSharedRendererCmd(),
 		// Defer database sync to avoid blocking UI at startup
 		func() tea.Msg {
 			// Small delay to let UI initialize first
@@ -396,25 +388,6 @@ func (m model) Init() tea.Cmd {
 			return nil
 		},
 	)
-}
-
-// initSharedRendererCmd creates the shared renderer asynchronously
-func (m model) initSharedRendererCmd() tea.Cmd {
-	return func() tea.Msg {
-		start := time.Now()
-		// Use simpler renderer configuration for better performance
-		// Avoid WithAutoStyle() as it can be slow - use basic styling instead
-		renderer, err := glamour.NewTermRenderer(
-			glamour.WithWordWrap(80),
-			glamour.WithPreservedNewLines(), // Preserve newlines for better performance
-		)
-		if err != nil {
-			log.Printf("Failed to create shared renderer: %v", err)
-			return sharedRendererReadyMsg{renderer: nil}
-		}
-		log.Printf("Shared renderer created in %v", time.Since(start))
-		return sharedRendererReadyMsg{renderer: renderer}
-	}
 }
 
 // Walks the current directory and returns a message with items
@@ -644,7 +617,7 @@ func (m *model) updatePreview() tea.Cmd {
 			m.previewLoading = true
 			m.renderID++
 			currentID := m.renderID
-			return m.renderPreviewCmd(i.path, currentID, m.renderer)
+			return m.renderPreviewCmd(i.path, m.viewWidth, currentID)
 		}
 		return nil
 	}
@@ -661,18 +634,6 @@ func (m *model) updatePreview() tea.Cmd {
 		return nil
 	}
 
-	// Check if renderer is ready
-	if m.renderer == nil {
-		if !m.rendererInitializing {
-			// Start initializing the renderer
-			m.rendererInitializing = true
-			return m.initSharedRendererCmd()
-		}
-		// Renderer is initializing, show loading message
-		m.viewport.SetContent(infoStyle.Render("Loading renderer and preview..."))
-		return nil
-	}
-
 	// Show loading state and render asynchronously
 	m.previewLoading = true
 	m.viewport.SetContent(infoStyle.Render("Loading preview..."))
@@ -681,11 +642,12 @@ func (m *model) updatePreview() tea.Cmd {
 	m.renderID++
 	currentID := m.renderID
 
-	return m.renderPreviewCmd(i.path, currentID, m.renderer)
+	return m.renderPreviewCmd(i.path, m.viewWidth, currentID)
 }
 
-// renderPreviewCmd renders markdown content asynchronously using shared renderer
-func (m model) renderPreviewCmd(path string, id int, renderer *glamour.TermRenderer) tea.Cmd {
+// renderPreviewCmd renders markdown content asynchronously using a fresh renderer
+// to ensure concurrency safety and correct width handling.
+func (m model) renderPreviewCmd(path string, width int, id int) tea.Cmd {
 	return func() tea.Msg {
 		start := time.Now()
 
@@ -696,19 +658,33 @@ func (m model) renderPreviewCmd(path string, id int, renderer *glamour.TermRende
 		}
 		readDuration := time.Since(start)
 
-		// Use shared renderer - should already be initialized
-		if renderer == nil {
-			// Renderer not ready yet, show raw content with highlighting
-			highlightedContent := highlightMatches(string(content), m.searchQuery)
-			return previewRenderMsg{content: highlightedContent, path: path, id: id}
+		renderStart := time.Now()
+
+		// Create a local renderer to avoid race conditions with shared state.
+		// Set word wrap to the specific viewport width to fix table/layout panics.
+		// Safely handle width being too small.
+		safeWidth := width - 4 // Account for padding/borders
+		if safeWidth < 10 {
+			safeWidth = 80 // Fallback default
 		}
 
-		renderStart := time.Now()
-		str, err := renderer.Render(string(content))
+		renderer, err := glamour.NewTermRenderer(
+			glamour.WithWordWrap(safeWidth),
+			glamour.WithPreservedNewLines(),
+			// Use standard style to avoid potentially slow auto-detection in goroutine
+			// or rely on environment variables which Glamour handles.
+		)
+
+		var str string
+		if err == nil {
+			str, err = renderer.Render(string(content))
+		}
+
 		renderDuration := time.Since(renderStart)
 
 		if err != nil {
 			log.Printf("Glamour render error: %v", err)
+			// Fallback to raw text highlighting
 			highlightedContent := highlightMatches(string(content), m.searchQuery)
 			return previewRenderMsg{content: highlightedContent, path: path, id: id}
 		}
@@ -781,9 +757,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-		// Layout calculations
-		listWidth := msg.Width / 3
-		viewWidth := msg.Width - listWidth - 6 // borders/margins
+		// Layout calculations: Limit list to 35% of width to ensure preview visibility
+		listWidth := int(float64(msg.Width) * 0.35)
+		// Ensure reasonable minimum
+		if listWidth < 20 && msg.Width > 20 {
+			listWidth = 20
+		}
+
+		m.viewWidth = msg.Width - listWidth - 6 // borders/margins
 
 		m.fileList.SetSize(listWidth, msg.Height-4)
 		m.templateList.SetSize(msg.Width-4, msg.Height-4)
@@ -794,9 +775,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if searchHeight < 0 {
 			searchHeight = 0
 		}
-		m.searchList.SetSize(msg.Width-4, searchHeight)
+		// Apply constrained width to search list so it fits side-by-side
+		m.searchList.SetSize(listWidth, searchHeight)
 
-		m.viewport.Width = viewWidth
+		m.viewport.Width = m.viewWidth
 		m.viewport.Height = msg.Height - 4
 
 		// Trigger preview update with new dimensions
@@ -849,25 +831,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		log.Println("Indexing finished notification received")
 		// Start deferred database sync after initial UI is ready
 		cmds = append(cmds, m.deferredSyncDatabaseCmd())
-
-	case sharedRendererReadyMsg:
-		if msg.renderer != nil {
-			// Only assign renderer if we don't already have one
-			if m.renderer == nil {
-				m.renderer = msg.renderer
-				log.Println("Shared renderer ready and assigned to model")
-				// Trigger preview update with the new renderer
-				cmd = m.updatePreview()
-				if cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			} else {
-				log.Println("Shared renderer already exists, ignoring duplicate")
-			}
-		} else {
-			log.Println("Shared renderer initialization failed")
-		}
-		m.rendererInitializing = false
 
 	case previewRenderMsg:
 		// Only update if this is the most recent render request
@@ -1087,10 +1050,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchQuery = ""
 				return m, nil
 			case "enter":
-				if m.searchInput.Focused() {
-					m.searchInput, cmd = m.searchInput.Update(msg)
-					cmds = append(cmds, cmd)
-					return m, tea.Batch(cmds...)
+				if m.searchInput.Focused() && m.searchList.SelectedItem() == nil {
+					// If strictly focused with no selection, maybe do something else
+					// But we want to open the item if one is selected in the list
 				}
 				if i, ok := m.searchList.SelectedItem().(item); ok {
 					m.state = stateBrowser
@@ -1112,23 +1074,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.deleteInput.SetValue("")
 					return m, textinput.Blink
 				}
-			case "up", "k":
-				if m.searchInput.Focused() {
-					m.searchInput, cmd = m.searchInput.Update(msg)
-					cmds = append(cmds, cmd)
-					return m, tea.Batch(cmds...)
-				}
+			case "up", "k", "down", "j":
+				// Handle navigation in the list even if input is focused
 				m.searchList, cmd = m.searchList.Update(msg)
 				cmds = append(cmds, cmd)
-				return m, tea.Batch(cmds...)
-			case "down", "j":
-				if m.searchInput.Focused() {
-					m.searchInput, cmd = m.searchInput.Update(msg)
-					cmds = append(cmds, cmd)
-					return m, tea.Batch(cmds...)
+
+				// Trigger preview update immediately upon navigation
+				previewCmd := m.updatePreview()
+				if previewCmd != nil {
+					cmds = append(cmds, previewCmd)
 				}
-				m.searchList, cmd = m.searchList.Update(msg)
-				cmds = append(cmds, cmd)
 				return m, tea.Batch(cmds...)
 
 			default:
