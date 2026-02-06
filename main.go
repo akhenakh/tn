@@ -249,6 +249,12 @@ type filesRefreshedMsg []list.Item
 type searchResultMsg []list.Item
 type indexingFinishedMsg struct{}
 
+// previewRenderMsg carries async preview rendering result
+type previewRenderMsg struct {
+	content string
+	path    string
+}
+
 // --- Model ---
 
 type model struct {
@@ -271,6 +277,7 @@ type model struct {
 	width, height   int
 	renderer        *glamour.TermRenderer
 	fileToSelect    string // Track file to select after directory refresh
+	previewLoading  bool   // Track if preview is being rendered
 }
 
 func initialModel(cfg Config, db *sql.DB) model {
@@ -304,12 +311,6 @@ func initialModel(cfg Config, db *sql.DB) model {
 	si.CharLimit = 100
 	si.Width = 40
 
-	// Markdown Renderer
-	r, _ := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(80),
-	)
-
 	return model{
 		config:       cfg,
 		db:           db,
@@ -321,7 +322,7 @@ func initialModel(cfg Config, db *sql.DB) model {
 		textInput:    ti,
 		searchInput:  si,
 		currentDir:   cfg.BaseDoc,
-		renderer:     r,
+		renderer:     nil, // Will be created on first use
 	}
 }
 
@@ -484,8 +485,7 @@ func (m *model) loadTemplates() {
 	log.Printf("loadTemplates took %v", time.Since(start))
 }
 
-func (m *model) updatePreview() {
-	start := time.Now()
+func (m *model) updatePreview() tea.Cmd {
 	sel := m.fileList.SelectedItem()
 	if m.state == stateSearch {
 		sel = m.searchList.SelectedItem()
@@ -493,50 +493,71 @@ func (m *model) updatePreview() {
 
 	if sel == nil {
 		m.viewport.SetContent("")
-		return
+		return nil
 	}
 	i := sel.(item)
 
-	// Optimization: skip if file hasn't changed (checked by path)
-	if i.path == m.selectedFile && m.viewport.View() != "" {
-		// pass
+	// Skip if file hasn't changed and not currently loading
+	if i.path == m.selectedFile && !m.previewLoading && m.viewport.View() != "" {
+		return nil
 	}
 
 	m.selectedFile = i.path
 
 	if i.isDir {
 		m.viewport.SetContent(infoStyle.Render(fmt.Sprintf("Directory:\n%s", i.path)))
-		return
+		return nil
 	}
 
 	if !strings.HasSuffix(strings.ToLower(i.path), ".md") {
 		m.viewport.SetContent(infoStyle.Render(fmt.Sprintf("%s\n\nNot a markdown file.", filepath.Base(i.path))))
-		return
+		return nil
 	}
 
-	content, err := os.ReadFile(i.path)
-	readDuration := time.Since(start)
+	// Show loading state and render asynchronously
+	m.previewLoading = true
+	m.viewport.SetContent(infoStyle.Render("Loading preview..."))
 
-	if err != nil {
-		log.Printf("Error reading file for preview %s: %v", i.path, err)
-		m.viewport.SetContent(infoStyle.Render("Error reading file"))
-		return
+	return m.renderPreviewCmd(i.path)
+}
+
+// renderPreviewCmd renders markdown content asynchronously
+func (m model) renderPreviewCmd(path string) tea.Cmd {
+	return func() tea.Msg {
+		start := time.Now()
+
+		content, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("Error reading file for preview %s: %v", path, err)
+			return previewRenderMsg{content: infoStyle.Render("Error reading file"), path: path}
+		}
+		readDuration := time.Since(start)
+
+		renderStart := time.Now()
+
+		// Create renderer - this can be slow on first run (17+ seconds!)
+		renderer, err := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(80),
+		)
+		if err != nil {
+			log.Printf("Failed to create renderer: %v", err)
+			return previewRenderMsg{content: string(content), path: path}
+		}
+
+		str, err := renderer.Render(string(content))
+		renderDuration := time.Since(renderStart)
+
+		if err != nil {
+			log.Printf("Glamour render error: %v", err)
+			return previewRenderMsg{content: string(content), path: path}
+		}
+
+		log.Printf("Preview Render: %s | Read: %v | Render: %v | Total: %v",
+			filepath.Base(path), readDuration, renderDuration, time.Since(start))
+
+		return previewRenderMsg{content: str, path: path}
 	}
-
-	renderStart := time.Now()
-	str, err := m.renderer.Render(string(content))
-	renderDuration := time.Since(renderStart)
-
-	if err != nil {
-		log.Printf("Glamour render error: %v", err)
-		m.viewport.SetContent(string(content))
-	} else {
-		m.viewport.SetContent(str)
-	}
-
-	totalDuration := time.Since(start)
-	log.Printf("Preview Update: %s | Read: %v | Render: %v | Total: %v",
-		filepath.Base(i.path), readDuration, renderDuration, totalDuration)
 }
 
 func processTemplate(templatePath string) ([]byte, error) {
@@ -600,9 +621,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Width = viewWidth
 		m.viewport.Height = msg.Height - 4
 
-		// Reset renderer with new width
-		m.renderer, _ = glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(viewWidth))
-		m.updatePreview()
+		// Trigger preview update with new dimensions
+		cmd = m.updatePreview()
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	// Async Data handling
 	case filesRefreshedMsg:
@@ -617,13 +640,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.fileToSelect = "" // Clear after selection
 		}
-		m.updatePreview()
+		cmd = m.updatePreview()
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	case searchResultMsg:
 		cmd = m.searchList.SetItems(msg)
 		cmds = append(cmds, cmd)
 		m.searchList.StopSpinner()
-		m.updatePreview()
+		cmd = m.updatePreview()
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	case editorFinishedMsg:
 		if msg.err != nil {
@@ -633,10 +662,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
 		// Re-index the specific file that was edited
 		cmds = append(cmds, m.reindexFileCmd(m.selectedFile))
-		m.updatePreview()
+		cmd = m.updatePreview()
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	case indexingFinishedMsg:
 		log.Println("Indexing finished notification received")
+
+	case previewRenderMsg:
+		if msg.path == m.selectedFile {
+			m.viewport.SetContent(msg.content)
+		}
+		m.previewLoading = false
 
 	case tea.KeyMsg:
 		// Global Keys
@@ -755,7 +793,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.searchList.SelectedItem() != nil {
 					selPath := m.searchList.SelectedItem().(item).path
 					if selPath != m.selectedFile {
-						m.updatePreview()
+						previewCmd := m.updatePreview()
+						if previewCmd != nil {
+							cmds = append(cmds, previewCmd)
+						}
 					}
 				}
 				return m, cmd
@@ -778,7 +819,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.fileList.SelectedItem() != nil {
 			selPath := m.fileList.SelectedItem().(item).path
 			if selPath != m.selectedFile {
-				m.updatePreview()
+				previewCmd := m.updatePreview()
+				if previewCmd != nil {
+					cmds = append(cmds, previewCmd)
+				}
 			}
 		}
 		m.viewport, cmd = m.viewport.Update(msg)
@@ -797,22 +841,7 @@ func (m model) View() string {
 
 	switch m.state {
 	case stateSearch:
-		return lipgloss.JoinVertical(
-			lipgloss.Left,
-			docStyle.Render(m.searchInput.View()),
-			docStyle.Render(m.searchList.View()),
-			// Show preview below or to the side? The original requirement was preview on right.
-			// But for search, we usually want full width results.
-			// Let's stick to full width results + preview.
-			// Wait, the original layout was Browser(Left) + Preview(Right).
-			// Search replaces Browser? Or full screen?
-			// The original code rendered search full screen.
-			// Let's render Search List (Left) + Preview (Right) like browser?
-			// Or just Search List + Input.
-			// User asked "ctrl + f display Search Result Ranked"
-			// Let's do Split view for Search too: Search Input+List (Left), Preview (Right)
-		)
-		// Actually, to keep it consistent with browser view (List Left, Preview Right):
+		// Split view for Search: Search Input+List (Left), Preview (Right)
 		leftPane := lipgloss.JoinVertical(lipgloss.Left,
 			inputStyle.Render(m.searchInput.View()),
 			listStyle.Height(m.height-8).Render(m.searchList.View()),
