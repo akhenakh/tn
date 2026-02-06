@@ -987,11 +987,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
-	// Async Data handling
+		// Async Data handling
 	case filesRefreshedMsg:
 		m.updateFileListTitle()
 		m.fileList.SetItems(msg)
-		// If we have a file to select (from search), find and select it
+		// If we have a file/dir to select, find and select it
 		if m.fileToSelect != "" {
 			for idx, it := range msg {
 				if it.(item).path == m.fileToSelect {
@@ -1184,9 +1184,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cleanBase := filepath.Clean(m.config.BaseDoc)
 					// Only navigate up if parent is still within or equal to base directory
 					if cleanParent == cleanBase || strings.HasPrefix(cleanParent, cleanBase) {
+						// Save current directory path to reselect after refresh
+						m.fileToSelect = m.currentDir
 						m.currentDir = parent
 						m.updateFileListTitle()
-						m.fileList.ResetSelected()
 						cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
 						return m, tea.Batch(cmds...)
 					}
