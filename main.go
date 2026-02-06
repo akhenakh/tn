@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"database/sql"
 	"flag"
@@ -13,8 +14,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"text/template"
 	"time"
 
+	"github.com/Masterminds/sprig/v3"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -536,6 +539,25 @@ func (m *model) updatePreview() {
 		filepath.Base(i.path), readDuration, renderDuration, totalDuration)
 }
 
+func processTemplate(templatePath string) ([]byte, error) {
+	content, err := os.ReadFile(templatePath)
+	if err != nil {
+		return nil, err
+	}
+
+	tmpl, err := template.New("template").Funcs(sprig.FuncMap()).Parse(string(content))
+	if err != nil {
+		return nil, err
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, nil); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
 func openEditor(path string) tea.Cmd {
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
@@ -682,7 +704,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				var content []byte
 				if m.pendingTemplate != "" {
-					content, _ = os.ReadFile(m.pendingTemplate)
+					content, _ = processTemplate(m.pendingTemplate)
 				}
 				_ = os.WriteFile(fullPath, content, 0644)
 
