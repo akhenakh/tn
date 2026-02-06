@@ -216,6 +216,41 @@ var (
 	infoStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241")).
 			Padding(1)
+
+	helpStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241")).
+			Padding(1, 2)
+
+	helpContent = `
+TN - Terminal Note Manager
+
+Key Bindings:
+
+Navigation:
+  ↑/↓, j/k       Navigate file list
+  ←/h            Go up one directory
+  →/l, Enter     Open file or enter directory
+  esc, q         Quit application
+
+Actions:
+  ctrl+n         Create new note
+  ctrl+t         Create note from template
+  ctrl+f         Search notes
+  ?              Show/hide this help
+
+Search Mode:
+  esc            Exit search mode
+  Enter          Open selected search result
+  ↑/↓, j/k       Navigate search results
+
+Template Selection:
+  Enter          Select template
+  esc            Cancel template selection
+
+New Note Input:
+  Enter          Create note with entered name
+  esc            Cancel note creation
+`
 )
 
 type item struct {
@@ -234,6 +269,7 @@ const (
 	stateSearch
 	stateInputName
 	stateTemplateSelect
+	stateHelp
 )
 
 // Messages
@@ -241,6 +277,7 @@ type editorFinishedMsg struct{ err error }
 type filesRefreshedMsg []list.Item
 type searchResultMsg []list.Item
 type indexingFinishedMsg struct{}
+type toggleHelpMsg struct{}
 
 // previewRenderMsg carries async preview rendering result
 type previewRenderMsg struct {
@@ -277,6 +314,7 @@ type model struct {
 	previewLoading       bool   // Track if preview is being rendered
 	renderID             int    // Incremental ID to track current render request
 	rendererInitializing bool   // Track if shared renderer is being created
+	showHelp             bool   // Track if help is being shown
 }
 
 func initialModel(cfg Config, db *sql.DB) model {
@@ -796,13 +834,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.SetContent(msg.content)
 			m.previewLoading = false
 		}
-		// Otherwise, this is an outdated render result, ignore it
+	// Otherwise, this is an outdated render result, ignore it
 
 	case tea.KeyMsg:
 		// Global Keys
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "?":
+			m.showHelp = !m.showHelp
+			return m, nil
 		}
 
 		switch m.state {
@@ -828,7 +869,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			switch msg.String() {
-			case "q", "esc":
+			case "q":
+				return m, tea.Quit
+			case "esc":
+				if m.showHelp {
+					m.showHelp = false
+					return m, nil
+				}
 				return m, tea.Quit
 			case "ctrl+n": // New File
 				m.state = stateInputName
@@ -1053,6 +1100,13 @@ func (m model) View() string {
 		)
 
 	default: // stateBrowser
+		if m.showHelp {
+			return lipgloss.JoinHorizontal(
+				lipgloss.Top,
+				listStyle.Render(m.fileList.View()),
+				previewStyle.Width(m.viewport.Width).Render(helpStyle.Render(helpContent)),
+			)
+		}
 		return lipgloss.JoinHorizontal(
 			lipgloss.Top,
 			listStyle.Render(m.fileList.View()),
