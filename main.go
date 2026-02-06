@@ -77,6 +77,11 @@ func initDB(dbPath string) (*sql.DB, error) {
 		return nil, err
 	}
 
+	// Enable WAL mode for better concurrency (Reader doesn't block Writer)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
+		log.Printf("Failed to enable WAL mode: %v", err)
+	}
+
 	// Create Tracking Table
 	queryTrack := `
 	CREATE TABLE IF NOT EXISTS file_tracking (
@@ -118,6 +123,12 @@ func calculateHash(path string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
+// isIndexable checks if the file extension is supported for text indexing
+func isIndexable(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return ext == ".md" || ext == ".markdown" || ext == ".txt"
+}
+
 func parseMarkdown(path string) (headers string, content string, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -128,6 +139,17 @@ func parseMarkdown(path string) (headers string, content string, err error) {
 	scanner := bufio.NewScanner(f)
 	var headerBuilder strings.Builder
 	var contentBuilder strings.Builder
+
+	// Read first 512 bytes to ensure it's not binary content even if extension matches
+	// simple heuristic: check for null bytes
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	if n > 0 && bytes.Contains(buf[:n], []byte{0}) {
+		return "", "", fmt.Errorf("binary content detected")
+	}
+	// Reset file pointer
+	f.Seek(0, 0)
+	scanner = bufio.NewScanner(f)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -142,15 +164,22 @@ func parseMarkdown(path string) (headers string, content string, err error) {
 	return headerBuilder.String(), contentBuilder.String(), scanner.Err()
 }
 
-func indexFile(db *sql.DB, path string) error {
+// indexFileWithTx indexes a file using an existing transaction.
+// This is used for bulk indexing to avoid transaction overhead per file.
+func indexFileWithTx(tx *sql.Tx, path string) error {
+	// Strictly check extension before processing
+	if !isIndexable(path) {
+		return nil
+	}
+
 	hash, err := calculateHash(path)
 	if err != nil {
 		return err
 	}
 
-	// Check if update needed
+	// Check if update needed within the transaction
 	var storedHash string
-	err = db.QueryRow("SELECT hash FROM file_tracking WHERE path = ?", path).Scan(&storedHash)
+	err = tx.QueryRow("SELECT hash FROM file_tracking WHERE path = ?", path).Scan(&storedHash)
 	if err == nil && storedHash == hash {
 		return nil // No changes
 	}
@@ -159,27 +188,20 @@ func indexFile(db *sql.DB, path string) error {
 
 	headers, content, err := parseMarkdown(path)
 	if err != nil {
-		return err
+		return err // Maybe binary or read error, skip indexing
 	}
 	filename := filepath.Base(path)
-
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
 
 	// Upsert tracking
 	_, err = tx.Exec("INSERT OR REPLACE INTO file_tracking (path, hash, last_indexed) VALUES (?, ?, ?)",
 		path, hash, time.Now())
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 
 	// Delete old FTS entry if exists
 	_, err = tx.Exec("DELETE FROM search_idx WHERE path = ?", path)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 
@@ -187,11 +209,45 @@ func indexFile(db *sql.DB, path string) error {
 	_, err = tx.Exec("INSERT INTO search_idx (path, filename, headers, content) VALUES (?, ?, ?, ?)",
 		path, filename, headers, content)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 
+	return nil
+}
+
+// indexFile is a wrapper for single file indexing (e.g., after editing)
+func indexFile(db *sql.DB, path string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if err := indexFileWithTx(tx, path); err != nil {
+		tx.Rollback()
+		return err
+	}
 	return tx.Commit()
+}
+
+// removeFileFromDB cleans up the database when a file is renamed or deleted
+func removeFileFromDB(db *sql.DB, path string) {
+	if _, err := db.Exec("DELETE FROM file_tracking WHERE path = ?", path); err != nil {
+		log.Printf("Error deleting from file_tracking: %v", err)
+	}
+	if _, err := db.Exec("DELETE FROM search_idx WHERE path = ?", path); err != nil {
+		log.Printf("Error deleting from search_idx: %v", err)
+	}
+}
+
+// Helper to sanitize snippets for display
+func sanitizeSnippet(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	re := regexp.MustCompile(`[\x00-\x1f\x7f]+`)
+	s = re.ReplaceAllString(s, " ")
+	reSpace := regexp.MustCompile(`\s+`)
+	s = reSpace.ReplaceAllString(s, " ")
+	return strings.TrimSpace(s)
 }
 
 var (
@@ -237,6 +293,8 @@ Actions:
   ctrl+n         Create new note
   ctrl+t         Create note from template
   ctrl+f         Search notes
+  c              Create directory
+  r              Rename file/directory
   d              Delete file
   ?              Show/hide this help
 
@@ -250,9 +308,9 @@ Template Selection:
   Enter          Select template
   esc            Cancel template selection
 
-New Note Input:
-  Enter          Create note with entered name
-  esc            Cancel note creation
+Input Modes:
+  Enter          Confirm action
+  esc            Cancel action
 
 Delete Confirmation:
   Type 'yes' to confirm deletion
@@ -278,15 +336,20 @@ const (
 	stateTemplateSelect
 	stateHelp
 	stateConfirmDelete
+	stateCreateDir
+	stateRename
 )
 
 // Messages
 type editorFinishedMsg struct{ err error }
 type filesRefreshedMsg []list.Item
 type searchResultMsg []list.Item
-type indexingFinishedMsg struct{}
 type toggleHelpMsg struct{}
 type deleteConfirmedMsg bool
+
+// Background Scan Messages
+type scanCompleteMsg struct{}
+type scanTickMsg time.Time
 
 // previewRenderMsg carries async preview rendering result
 type previewRenderMsg struct {
@@ -310,19 +373,21 @@ type model struct {
 	deleteInput  textinput.Model
 
 	// Logic state
-	currentDir      string
-	selectedFile    string
-	pendingTemplate string
-	fileToDelete    string // Track file to be deleted
-	width, height   int
-	listWidth       int    // Calculated inner width for list
-	viewWidth       int    // Calculated inner width for viewport
-	inputWidth      int    // Calculated inner width for input
-	fileToSelect    string // Track file to select after directory refresh
-	previewLoading  bool   // Track if preview is being rendered
-	renderID        int    // Incremental ID to track current render request
-	showHelp        bool   // Track if help is being shown
-	searchQuery     string // Current search query for highlighting
+	currentDir       string
+	selectedFile     string
+	pendingTemplate  string
+	fileToDelete     string // Track file to be deleted
+	fileToRename     string // Track file to be renamed
+	width, height    int
+	listWidth        int    // Calculated inner width for list
+	viewWidth        int    // Calculated inner width for viewport
+	inputWidth       int    // Calculated inner width for input
+	searchListHeight int    // Calculated height for search list content
+	fileToSelect     string // Track file to select after directory refresh
+	previewLoading   bool   // Track if preview is being rendered
+	renderID         int    // Incremental ID to track current render request
+	showHelp         bool   // Track if help is being shown
+	searchQuery      string // Current search query for highlighting
 }
 
 func initialModel(cfg Config, db *sql.DB) model {
@@ -379,17 +444,61 @@ func initialModel(cfg Config, db *sql.DB) model {
 
 func (m model) Init() tea.Cmd {
 	// Start with just the essential operations
-	// Stagger heavy operations to avoid UI blocking
 	return tea.Batch(
 		textinput.Blink,
 		m.refreshFileListCmd(m.currentDir),
-		// Defer database sync to avoid blocking UI at startup
-		func() tea.Msg {
-			// Small delay to let UI initialize first
-			time.Sleep(100 * time.Millisecond)
-			return nil
-		},
+		m.startBackgroundScan(), // Start the first scan immediately
 	)
+}
+
+// startBackgroundScan creates a command that walks the directory and indexes files using a batch transaction.
+func (m model) startBackgroundScan() tea.Cmd {
+	return func() tea.Msg {
+		log.Println("Starting background database scan...")
+		start := time.Now()
+
+		tx, err := m.db.Begin()
+		if err != nil {
+			log.Printf("Failed to begin transaction for scan: %v", err)
+			return scanCompleteMsg{}
+		}
+
+		// Rollback on panic or error (if not committed)
+		defer func() {
+			_ = tx.Rollback()
+		}()
+
+		count := 0
+		err = filepath.WalkDir(m.config.BaseDoc, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil // skip errors accessing paths
+			}
+			if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != m.config.BaseDoc {
+				return fs.SkipDir
+			}
+			// Only index supported file types
+			if !d.IsDir() && isIndexable(d.Name()) && !strings.HasPrefix(d.Name(), ".") {
+				if err := indexFileWithTx(tx, path); err != nil {
+					log.Printf("Failed to index %s: %v", path, err)
+				} else {
+					count++
+				}
+			}
+			return nil
+		})
+
+		if err != nil {
+			log.Printf("Background scan walk error: %v", err)
+		} else {
+			if err := tx.Commit(); err != nil {
+				log.Printf("Failed to commit scan transaction: %v", err)
+			} else {
+				log.Printf("Background scan completed in %v. Processed %d files.", time.Since(start), count)
+			}
+		}
+
+		return scanCompleteMsg{}
+	}
 }
 
 // Walks the current directory and returns a message with items
@@ -492,46 +601,20 @@ func (m model) searchCmd(query string) tea.Cmd {
 				continue
 			}
 
+			// Clean snippet to avoid UI bugs
+			snip = sanitizeSnippet(snip)
+
 			// Make relative path for display title
 			rel, _ := filepath.Rel(m.config.BaseDoc, path)
 
 			items = append(items, item{
 				title: rel,
-				desc:  snip, // Display snippet as description
+				desc:  snip, // Display cleaned snippet
 				path:  path,
 				isDir: false,
 			})
 		}
 		return searchResultMsg(items)
-	}
-}
-
-// Background sync of all files
-func (m model) syncDatabaseCmd() tea.Cmd {
-	return func() tea.Msg {
-		start := time.Now()
-		log.Println("Starting full DB sync...")
-
-		err := filepath.WalkDir(m.config.BaseDoc, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != m.config.BaseDoc {
-				return fs.SkipDir
-			}
-			if !d.IsDir() && (strings.HasSuffix(d.Name(), ".md") || strings.HasSuffix(d.Name(), ".markdown") || strings.HasSuffix(d.Name(), ".txt")) && !strings.HasPrefix(d.Name(), ".") {
-				if err := indexFile(m.db, path); err != nil {
-					log.Printf("Failed to index %s: %v", path, err)
-				}
-			}
-			return nil
-		})
-
-		if err != nil {
-			log.Printf("Sync error: %v", err)
-		}
-		log.Printf("DB sync completed in %v", time.Since(start))
-		return indexingFinishedMsg{}
 	}
 }
 
@@ -547,44 +630,12 @@ func (m model) reindexFileCmd(path string) tea.Cmd {
 	}
 }
 
-// Deferred database sync - runs after UI is ready
-func (m model) deferredSyncDatabaseCmd() tea.Cmd {
-	return func() tea.Msg {
-		// Run in separate goroutine to avoid blocking UI
-		go func() {
-			start := time.Now()
-			log.Println("Starting deferred DB sync...")
-
-			err := filepath.WalkDir(m.config.BaseDoc, func(path string, d fs.DirEntry, err error) error {
-				if err != nil {
-					return nil
-				}
-				if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != m.config.BaseDoc {
-					return fs.SkipDir
-				}
-				if !d.IsDir() && (strings.HasSuffix(d.Name(), ".md") || strings.HasSuffix(d.Name(), ".markdown") || strings.HasSuffix(d.Name(), ".txt")) && !strings.HasPrefix(d.Name(), ".") {
-					if err := indexFile(m.db, path); err != nil {
-						log.Printf("Failed to index %s: %v", path, err)
-					}
-				}
-				return nil
-			})
-
-			if err != nil {
-				log.Printf("Sync error: %v", err)
-			}
-			log.Printf("Deferred DB sync completed in %v", time.Since(start))
-		}()
-		return indexingFinishedMsg{}
-	}
-}
-
 func (m *model) loadTemplates() {
 	start := time.Now()
 	entries, _ := os.ReadDir(m.config.TemplatesDir)
 	var items []list.Item
 	for _, e := range entries {
-		if !e.IsDir() && (strings.HasSuffix(e.Name(), ".md") || strings.HasSuffix(e.Name(), ".markdown") || strings.HasSuffix(e.Name(), ".txt")) && !strings.HasPrefix(e.Name(), ".") {
+		if !e.IsDir() && isIndexable(e.Name()) && !strings.HasPrefix(e.Name(), ".") {
 			items = append(items, item{
 				title: e.Name(),
 				desc:  "Template",
@@ -631,8 +682,8 @@ func (m *model) updatePreview() tea.Cmd {
 		return nil
 	}
 
-	if !strings.HasSuffix(strings.ToLower(i.path), ".md") && !strings.HasSuffix(strings.ToLower(i.path), ".markdown") && !strings.HasSuffix(strings.ToLower(i.path), ".txt") {
-		m.viewport.SetContent(infoStyle.Render(fmt.Sprintf("%s\n\nNot a supported file type.", filepath.Base(i.path))))
+	if !isIndexable(i.path) {
+		m.viewport.SetContent(infoStyle.Render(fmt.Sprintf("%s\n\nNot a supported file type for preview.", filepath.Base(i.path))))
 		return nil
 	}
 
@@ -798,12 +849,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.templateList.SetSize(msg.Width-4, msg.Height-4)
 
 		// Search list needs less height because of the input box
-		// approx 3 lines for input
-		searchHeight := msg.Height - 4 - 3
+		// We allocate generous space for the input box (5 lines approx)
+		// and some safety margin to prevent scrolling the top off.
+		// Total Height - InputBox (~5) - ListBorder(2) - Safety (~5) = Height - 12
+		searchHeight := msg.Height - 12
 		if searchHeight < 0 {
 			searchHeight = 0
 		}
-		m.searchList.SetSize(m.listWidth, searchHeight)
+		m.searchListHeight = searchHeight
+		m.searchList.SetSize(m.listWidth, m.searchListHeight)
 
 		m.viewport.Width = m.viewWidth
 		m.viewport.Height = msg.Height - 4
@@ -854,10 +908,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
-	case indexingFinishedMsg:
-		log.Println("Indexing finished notification received")
-		// Start deferred database sync after initial UI is ready
-		cmds = append(cmds, m.deferredSyncDatabaseCmd())
+	case scanCompleteMsg:
+		// When scan is done, wait 30 seconds before next scan
+		return m, tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
+			return scanTickMsg(t)
+		})
+
+	case scanTickMsg:
+		// Trigger the next background scan
+		return m, m.startBackgroundScan()
 
 	case previewRenderMsg:
 		// Only update if this is the most recent render request
@@ -914,6 +973,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textInput.SetValue("")
 				m.pendingTemplate = ""
 				return m, nil
+			case "c": // Create Directory
+				m.state = stateCreateDir
+				m.textInput.Focus()
+				m.textInput.SetValue("")
+				m.textInput.Placeholder = "New directory name"
+				return m, nil
+			case "r": // Rename
+				if i, ok := m.fileList.SelectedItem().(item); ok {
+					m.fileToRename = i.path
+					m.state = stateRename
+					m.textInput.Focus()
+					m.textInput.SetValue(i.title)
+					m.textInput.Placeholder = "New name"
+					return m, nil
+				}
 			case "ctrl+t": // New from Template
 				m.loadTemplates()
 				m.state = stateTemplateSelect
@@ -988,6 +1062,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
+		case stateCreateDir:
+			switch msg.Type {
+			case tea.KeyCtrlC:
+				return m, tea.Quit
+			case tea.KeyEnter:
+				dirName := m.textInput.Value()
+				if dirName != "" {
+					newPath := filepath.Join(m.currentDir, dirName)
+					if err := os.Mkdir(newPath, 0755); err != nil {
+						log.Printf("Error creating directory: %v", err)
+					}
+				}
+				m.state = stateBrowser
+				m.textInput.SetValue("")
+				return m, m.refreshFileListCmd(m.currentDir)
+			case tea.KeyEsc:
+				m.state = stateBrowser
+				m.textInput.Blur()
+				m.textInput.SetValue("")
+			}
+			m.textInput, cmd = m.textInput.Update(msg)
+			return m, cmd
+
+		case stateRename:
+			switch msg.Type {
+			case tea.KeyCtrlC:
+				return m, tea.Quit
+			case tea.KeyEnter:
+				newName := m.textInput.Value()
+				if newName != "" {
+					newPath := filepath.Join(filepath.Dir(m.fileToRename), newName)
+					if err := os.Rename(m.fileToRename, newPath); err != nil {
+						log.Printf("Error renaming: %v", err)
+					} else {
+						// Clean up DB for the old file so it doesn't show up in search
+						removeFileFromDB(m.db, m.fileToRename)
+					}
+				}
+				m.state = stateBrowser
+				m.textInput.SetValue("")
+				return m, m.refreshFileListCmd(m.currentDir)
+			case tea.KeyEsc:
+				m.state = stateBrowser
+				m.textInput.Blur()
+				m.textInput.SetValue("")
+			}
+			m.textInput, cmd = m.textInput.Update(msg)
+			return m, cmd
+
 		case stateInputName:
 			switch msg.Type {
 			case tea.KeyCtrlC:
@@ -1035,6 +1158,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						log.Printf("Error deleting file %s: %v", m.fileToDelete, err)
 					} else {
 						log.Printf("Deleted file: %s", m.fileToDelete)
+						removeFileFromDB(m.db, m.fileToDelete)
 					}
 					m.fileToDelete = ""
 					m.state = stateBrowser
@@ -1159,9 +1283,11 @@ func (m model) View() string {
 	switch m.state {
 	case stateSearch:
 		// Split view for Search: Search Input+List (Left), Preview (Right)
+		// We strictly control heights to prevent the input from being pushed off-screen.
+		// The list style height must match the content height we calculated in Update.
 		leftPane := lipgloss.JoinVertical(lipgloss.Left,
 			inputStyle.Width(m.inputWidth).Render(m.searchInput.View()),
-			listStyle.Width(m.listWidth).Height(m.height-8).Render(m.searchList.View()),
+			listStyle.Width(m.listWidth).Height(m.searchListHeight).Render(m.searchList.View()),
 		)
 		return lipgloss.JoinHorizontal(
 			lipgloss.Top,
@@ -1171,6 +1297,22 @@ func (m model) View() string {
 
 	case stateTemplateSelect:
 		return docStyle.Render(m.templateList.View())
+
+	case stateCreateDir:
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			inputStyle.Render(
+				fmt.Sprintf("Create Directory\n\n%s", m.textInput.View()),
+			),
+		)
+
+	case stateRename:
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			inputStyle.Render(
+				fmt.Sprintf("Rename\n\n%s", m.textInput.View()),
+			),
+		)
 
 	case stateInputName:
 		title := "New Note"
