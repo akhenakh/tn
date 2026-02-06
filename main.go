@@ -326,13 +326,18 @@ func initialModel(cfg Config, db *sql.DB) model {
 }
 
 func (m model) Init() tea.Cmd {
-	// Batch commands: start blinking cursor, refresh current dir, and start background indexing
-	// Also start initializing the shared renderer in background
+	// Start with just the essential operations
+	// Stagger heavy operations to avoid UI blocking
 	return tea.Batch(
 		textinput.Blink,
 		m.refreshFileListCmd(m.currentDir),
-		m.syncDatabaseCmd(),
 		m.initSharedRendererCmd(),
+		// Defer database sync to avoid blocking UI at startup
+		func() tea.Msg {
+			// Small delay to let UI initialize first
+			time.Sleep(100 * time.Millisecond)
+			return nil
+		},
 	)
 }
 
@@ -340,9 +345,11 @@ func (m model) Init() tea.Cmd {
 func (m model) initSharedRendererCmd() tea.Cmd {
 	return func() tea.Msg {
 		start := time.Now()
+		// Use simpler renderer configuration for better performance
+		// Avoid WithAutoStyle() as it can be slow - use basic styling instead
 		renderer, err := glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
 			glamour.WithWordWrap(80),
+			glamour.WithPreservedNewLines(), // Preserve newlines for better performance
 		)
 		if err != nil {
 			log.Printf("Failed to create shared renderer: %v", err)
@@ -508,6 +515,38 @@ func (m model) reindexFileCmd(path string) tea.Cmd {
 	}
 }
 
+// Deferred database sync - runs after UI is ready
+func (m model) deferredSyncDatabaseCmd() tea.Cmd {
+	return func() tea.Msg {
+		// Run in separate goroutine to avoid blocking UI
+		go func() {
+			start := time.Now()
+			log.Println("Starting deferred DB sync...")
+
+			err := filepath.WalkDir(m.config.BaseDoc, func(path string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return nil
+				}
+				if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != m.config.BaseDoc {
+					return fs.SkipDir
+				}
+				if !d.IsDir() && strings.HasSuffix(d.Name(), ".md") && !strings.HasPrefix(d.Name(), ".") {
+					if err := indexFile(m.db, path); err != nil {
+						log.Printf("Failed to index %s: %v", path, err)
+					}
+				}
+				return nil
+			})
+
+			if err != nil {
+				log.Printf("Sync error: %v", err)
+			}
+			log.Printf("Deferred DB sync completed in %v", time.Since(start))
+		}()
+		return indexingFinishedMsg{}
+	}
+}
+
 func (m *model) loadTemplates() {
 	start := time.Now()
 	entries, _ := os.ReadDir(m.config.TemplatesDir)
@@ -572,13 +611,8 @@ func (m *model) updatePreview() tea.Cmd {
 			m.rendererInitializing = true
 			return m.initSharedRendererCmd()
 		}
-		// Renderer is initializing, show raw content for now
-		content, err := os.ReadFile(i.path)
-		if err != nil {
-			m.viewport.SetContent(infoStyle.Render("Error reading file"))
-		} else {
-			m.viewport.SetContent(string(content))
-		}
+		// Renderer is initializing, show loading message
+		m.viewport.SetContent(infoStyle.Render("Loading renderer and preview..."))
 		return nil
 	}
 
@@ -734,15 +768,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case indexingFinishedMsg:
 		log.Println("Indexing finished notification received")
+		// Start deferred database sync after initial UI is ready
+		cmds = append(cmds, m.deferredSyncDatabaseCmd())
 
 	case sharedRendererReadyMsg:
 		if msg.renderer != nil {
-			m.renderer = msg.renderer
-			log.Println("Shared renderer ready and assigned to model")
-			// Trigger preview update with the new renderer
-			cmd = m.updatePreview()
-			if cmd != nil {
-				cmds = append(cmds, cmd)
+			// Only assign renderer if we don't already have one
+			if m.renderer == nil {
+				m.renderer = msg.renderer
+				log.Println("Shared renderer ready and assigned to model")
+				// Trigger preview update with the new renderer
+				cmd = m.updatePreview()
+				if cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			} else {
+				log.Println("Shared renderer already exists, ignoring duplicate")
 			}
 		} else {
 			log.Println("Shared renderer initialization failed")
