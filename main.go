@@ -315,7 +315,9 @@ type model struct {
 	pendingTemplate string
 	fileToDelete    string // Track file to be deleted
 	width, height   int
-	viewWidth       int    // Width available for preview/content
+	listWidth       int    // Calculated inner width for list
+	viewWidth       int    // Calculated inner width for viewport
+	inputWidth      int    // Calculated inner width for input
 	fileToSelect    string // Track file to select after directory refresh
 	previewLoading  bool   // Track if preview is being rendered
 	renderID        int    // Incremental ID to track current render request
@@ -757,16 +759,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-		// Layout calculations: Limit list to 35% of width to ensure preview visibility
-		listWidth := int(float64(msg.Width) * 0.35)
-		// Ensure reasonable minimum
-		if listWidth < 20 && msg.Width > 20 {
-			listWidth = 20
+		// Calculate exact widths
+		// 1. List is strictly 30% of total width
+		listOuterWidth := int(float64(msg.Width) * 0.30)
+		if listOuterWidth < 20 {
+			listOuterWidth = 20
 		}
 
-		m.viewWidth = msg.Width - listWidth - 6 // borders/margins
+		// 2. Preview takes the remaining width
+		previewOuterWidth := msg.Width - listOuterWidth
 
-		m.fileList.SetSize(listWidth, msg.Height-4)
+		// 3. Calculate inner widths by subtracting styling overhead
+		// listStyle has Border(2) + Padding(2) + MarginRight(1) = 5
+		m.listWidth = listOuterWidth - 5
+
+		// previewStyle has Border(2) + Padding(2) = 4
+		m.viewWidth = previewOuterWidth - 4
+
+		// 4. Calculate input width for search mode
+		// Input style has Border(2) + Padding(2) = 4
+		// To align with the list column, we want Input Outer to equal List Outer - Margin(1)
+		// InputInner = (ListOuter - 1) - InputOverhead(4) = ListOuter - 5
+		// This happens to be the same as m.listWidth!
+		m.inputWidth = m.listWidth
+
+		// Safety checks
+		if m.listWidth < 10 {
+			m.listWidth = 10
+		}
+		if m.viewWidth < 10 {
+			m.viewWidth = 10
+		}
+		if m.inputWidth < 10 {
+			m.inputWidth = 10
+		}
+
+		m.fileList.SetSize(m.listWidth, msg.Height-4)
 		m.templateList.SetSize(msg.Width-4, msg.Height-4)
 
 		// Search list needs less height because of the input box
@@ -775,8 +803,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if searchHeight < 0 {
 			searchHeight = 0
 		}
-		// Apply constrained width to search list so it fits side-by-side
-		m.searchList.SetSize(listWidth, searchHeight)
+		m.searchList.SetSize(m.listWidth, searchHeight)
 
 		m.viewport.Width = m.viewWidth
 		m.viewport.Height = msg.Height - 4
@@ -1133,13 +1160,13 @@ func (m model) View() string {
 	case stateSearch:
 		// Split view for Search: Search Input+List (Left), Preview (Right)
 		leftPane := lipgloss.JoinVertical(lipgloss.Left,
-			inputStyle.Render(m.searchInput.View()),
-			listStyle.Height(m.height-8).Render(m.searchList.View()),
+			inputStyle.Width(m.inputWidth).Render(m.searchInput.View()),
+			listStyle.Width(m.listWidth).Height(m.height-8).Render(m.searchList.View()),
 		)
 		return lipgloss.JoinHorizontal(
 			lipgloss.Top,
 			leftPane,
-			previewStyle.Width(m.viewport.Width).Render(m.viewport.View()),
+			previewStyle.Width(m.viewWidth).Render(m.viewport.View()),
 		)
 
 	case stateTemplateSelect:
@@ -1169,14 +1196,14 @@ func (m model) View() string {
 		if m.showHelp {
 			return lipgloss.JoinHorizontal(
 				lipgloss.Top,
-				listStyle.Render(m.fileList.View()),
-				previewStyle.Width(m.viewport.Width).Render(helpStyle.Render(helpContent)),
+				listStyle.Width(m.listWidth).Render(m.fileList.View()),
+				previewStyle.Width(m.viewWidth).Render(helpStyle.Render(helpContent)),
 			)
 		}
 		return lipgloss.JoinHorizontal(
 			lipgloss.Top,
-			listStyle.Render(m.fileList.View()),
-			previewStyle.Width(m.viewport.Width).Render(m.viewport.View()),
+			listStyle.Width(m.listWidth).Render(m.fileList.View()),
+			previewStyle.Width(m.viewWidth).Render(m.viewport.View()),
 		)
 	}
 }
