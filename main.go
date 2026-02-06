@@ -28,8 +28,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// --- Configuration ---
-
 type Config struct {
 	BaseDoc      string `yaml:"base_doc"`
 	TemplatesDir string `yaml:"templates_dir"`
@@ -70,8 +68,6 @@ func loadConfig() (Config, error) {
 	log.Printf("Config loaded. BaseDoc: %s", cfg.BaseDoc)
 	return cfg, err
 }
-
-// --- Database & Indexing ---
 
 func initDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -196,8 +192,6 @@ func indexFile(db *sql.DB, path string) error {
 	return tx.Commit()
 }
 
-// --- Styles ---
-
 var (
 	docStyle = lipgloss.NewStyle().Margin(1, 2)
 
@@ -222,8 +216,6 @@ var (
 			Foreground(lipgloss.Color("241")).
 			Padding(1)
 )
-
-// --- Types & Messages ---
 
 type item struct {
 	title, desc, path string
@@ -260,8 +252,6 @@ type previewRenderMsg struct {
 type sharedRendererReadyMsg struct {
 	renderer *glamour.TermRenderer
 }
-
-// --- Model ---
 
 type model struct {
 	config Config
@@ -361,8 +351,6 @@ func (m model) initSharedRendererCmd() tea.Cmd {
 		return sharedRendererReadyMsg{renderer: renderer}
 	}
 }
-
-// --- Commands (Async operations) ---
 
 // Walks the current directory and returns a message with items
 func (m model) refreshFileListCmd(dir string) tea.Cmd {
@@ -646,8 +634,6 @@ func openEditor(path string) tea.Cmd {
 		return editorFinishedMsg{err}
 	})
 }
-
-// --- Update ---
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
@@ -940,8 +926,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// --- View ---
-
 func (m model) View() string {
 	if m.width == 0 {
 		return "Initializing UI..."
@@ -983,8 +967,6 @@ func (m model) View() string {
 		)
 	}
 }
-
-// --- Main ---
 
 func main() {
 	debug := flag.Bool("debug", false, "enable debug logging to debug.log")
