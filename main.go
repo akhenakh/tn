@@ -579,17 +579,20 @@ func (m model) searchCmd(query string) tea.Cmd {
 		// Using prefix match on the query
 		term := query + "*"
 
+		// Escape single quotes in query to prevent SQL injection
+		// FTS5 MATCH doesn't support parameter binding, so we must construct the query carefully
+		escapedTerm := strings.ReplaceAll(term, "'", "''")
+
 		// Weighted query: Filename (10), Headers (5), Content (1)
-		q := `
+		q := fmt.Sprintf(`
 		SELECT path, snippet(search_idx, 3, '>', '<', '...', 10) 
 		FROM search_idx 
-		WHERE search_idx MATCH ? 
+		WHERE search_idx MATCH '%s' 
 		ORDER BY bm25(search_idx, 10.0, 5.0, 1.0) 
-		LIMIT 20;`
+		LIMIT 20;`, escapedTerm)
 
-		rows, err := m.db.Query(q, term)
+		rows, err := m.db.Query(q)
 		if err != nil {
-			log.Printf("Search error: %v", err)
 			return searchResultMsg(nil)
 		}
 		defer rows.Close()
