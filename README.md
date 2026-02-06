@@ -37,7 +37,18 @@ The application creates this config directory automatically on first run with se
 
 ### Templates
 
-Place template files (`.md` files) in your templates directory. Templates support Go template syntax with Sprig functions:
+Template files (`.md` files) can be placed in the `templates/` directory or your configured `templates_dir`. The repository includes example templates:
+
+- **`templates/hugo.md`** - Hugo-compatible frontmatter with TOML format
+- **`templates/daily.md`** - Simple daily note with date
+
+To use these, copy them to your config templates directory:
+
+```sh
+cp templates/*.md ~/.config/tn/templates/
+```
+
+Templates support Go template syntax with Sprig functions:
 
 ```markdown
 ---
@@ -94,7 +105,7 @@ Run `tn` to start the application:
 
 - **Database**: `~/.config/tn/tn.db` (SQLite with FTS5)
 - **Config**: `~/.config/tn/config.yaml`
-- **Templates**: `~/.config/tn/templates/`
+- **Templates**: `~/.config/tn/templates/` (copy examples from `templates/`)
 
 The database maintains an index of all markdown files for fast searching. It automatically re-indexes files when they change.
 
