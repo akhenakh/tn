@@ -88,10 +88,12 @@ Run `tn` to start the application:
 - `Ctrl+N` - Create new note
 - `Ctrl+T` - Create note from template
 - `Ctrl+F` - Open search
+- `d` - Delete file
 - `q` - Quit
 
 #### Search Mode
 - Type to search - Results update in real-time
+- `d` - Delete file
 - `↑/↓` - Navigate search results
 - `Enter` - Jump to selected file
 - `Esc` - Return to file browser

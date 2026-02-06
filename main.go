@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"text/template"
@@ -236,9 +237,11 @@ Actions:
   ctrl+n         Create new note
   ctrl+t         Create note from template
   ctrl+f         Search notes
+  d              Delete file
   ?              Show/hide this help
 
 Search Mode:
+  d              Delete file
   esc            Exit search mode
   Enter          Open selected search result
   ↑/↓, j/k       Navigate search results
@@ -250,6 +253,10 @@ Template Selection:
 New Note Input:
   Enter          Create note with entered name
   esc            Cancel note creation
+
+Delete Confirmation:
+  Type 'yes' to confirm deletion
+  esc            Cancel deletion
 `
 )
 
@@ -270,6 +277,7 @@ const (
 	stateInputName
 	stateTemplateSelect
 	stateHelp
+	stateConfirmDelete
 )
 
 // Messages
@@ -278,6 +286,7 @@ type filesRefreshedMsg []list.Item
 type searchResultMsg []list.Item
 type indexingFinishedMsg struct{}
 type toggleHelpMsg struct{}
+type deleteConfirmedMsg bool
 
 // previewRenderMsg carries async preview rendering result
 type previewRenderMsg struct {
@@ -303,11 +312,13 @@ type model struct {
 	viewport     viewport.Model
 	textInput    textinput.Model
 	searchInput  textinput.Model
+	deleteInput  textinput.Model
 
 	// Logic state
 	currentDir           string
 	selectedFile         string
 	pendingTemplate      string
+	fileToDelete         string // Track file to be deleted
 	width, height        int
 	renderer             *glamour.TermRenderer
 	fileToSelect         string // Track file to select after directory refresh
@@ -315,6 +326,7 @@ type model struct {
 	renderID             int    // Incremental ID to track current render request
 	rendererInitializing bool   // Track if shared renderer is being created
 	showHelp             bool   // Track if help is being shown
+	searchQuery          string // Current search query for highlighting
 }
 
 func initialModel(cfg Config, db *sql.DB) model {
@@ -348,6 +360,12 @@ func initialModel(cfg Config, db *sql.DB) model {
 	si.CharLimit = 100
 	si.Width = 40
 
+	// Initialize Delete Confirmation Input
+	di := textinput.New()
+	di.Placeholder = "Type 'yes' to confirm deletion"
+	di.CharLimit = 10
+	di.Width = 30
+
 	return model{
 		config:       cfg,
 		db:           db,
@@ -358,6 +376,7 @@ func initialModel(cfg Config, db *sql.DB) model {
 		viewport:     viewport.New(0, 0),
 		textInput:    ti,
 		searchInput:  si,
+		deleteInput:  di,
 		currentDir:   cfg.BaseDoc,
 		renderer:     nil, // Will be created on first use
 	}
@@ -615,9 +634,9 @@ func (m *model) updatePreview() tea.Cmd {
 	}
 	i := sel.(item)
 
-	// Skip if file hasn't changed and not currently loading
+	// Skip if file hasn't changed and not currently loading and no search query
 	// For search mode, be less restrictive to ensure navigation works properly
-	if i.path == m.selectedFile && !m.previewLoading && m.viewport.View() != "" {
+	if i.path == m.selectedFile && !m.previewLoading && m.viewport.View() != "" && m.searchQuery == "" {
 		// In search mode, always allow preview updates when navigating
 		if m.state == stateSearch {
 			// Force update if we're navigating in search mode
@@ -679,8 +698,9 @@ func (m model) renderPreviewCmd(path string, id int, renderer *glamour.TermRende
 
 		// Use shared renderer - should already be initialized
 		if renderer == nil {
-			// Renderer not ready yet, show raw content
-			return previewRenderMsg{content: string(content), path: path, id: id}
+			// Renderer not ready yet, show raw content with highlighting
+			highlightedContent := highlightMatches(string(content), m.searchQuery)
+			return previewRenderMsg{content: highlightedContent, path: path, id: id}
 		}
 
 		renderStart := time.Now()
@@ -689,13 +709,17 @@ func (m model) renderPreviewCmd(path string, id int, renderer *glamour.TermRende
 
 		if err != nil {
 			log.Printf("Glamour render error: %v", err)
-			return previewRenderMsg{content: string(content), path: path, id: id}
+			highlightedContent := highlightMatches(string(content), m.searchQuery)
+			return previewRenderMsg{content: highlightedContent, path: path, id: id}
 		}
+
+		// Highlight search matches in the rendered content
+		highlightedContent := highlightMatches(str, m.searchQuery)
 
 		log.Printf("Preview Render: %s | Read: %v | Render: %v | Total: %v",
 			filepath.Base(path), readDuration, renderDuration, time.Since(start))
 
-		return previewRenderMsg{content: str, path: path, id: id}
+		return previewRenderMsg{content: highlightedContent, path: path, id: id}
 	}
 }
 
@@ -716,6 +740,23 @@ func processTemplate(templatePath string) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+func highlightMatches(text, query string) string {
+	if query == "" {
+		return text
+	}
+
+	// Escape special regex characters
+	escapedQuery := regexp.QuoteMeta(query)
+
+	// Create case-insensitive regex pattern
+	pattern := "(?i)(" + escapedQuery + ")"
+	re := regexp.MustCompile(pattern)
+
+	// Highlight matches with ANSI escape codes for red background
+	// Red background (41) with white text (37)
+	return re.ReplaceAllString(text, "\x1b[37;41m$1\x1b[0m")
 }
 
 func openEditor(path string) tea.Cmd {
@@ -893,6 +934,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchInput.SetValue("")
 				m.searchList.SetItems([]list.Item{})
 				return m, textinput.Blink
+			case "d": // Delete file
+				if i, ok := m.fileList.SelectedItem().(item); ok && !i.isDir {
+					m.fileToDelete = i.path
+					m.state = stateConfirmDelete
+					m.deleteInput.Focus()
+					m.deleteInput.SetValue("")
+					return m, textinput.Blink
+				}
 
 			// Navigation
 			case "enter":
@@ -987,6 +1036,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textInput, cmd = m.textInput.Update(msg)
 			return m, cmd
 
+		case stateConfirmDelete:
+			switch msg.Type {
+			case tea.KeyEnter:
+				if strings.EqualFold(m.deleteInput.Value(), "yes") {
+					err := os.Remove(m.fileToDelete)
+					if err != nil {
+						log.Printf("Error deleting file %s: %v", m.fileToDelete, err)
+					} else {
+						log.Printf("Deleted file: %s", m.fileToDelete)
+					}
+					m.fileToDelete = ""
+					m.state = stateBrowser
+					return m, tea.Batch(m.refreshFileListCmd(m.currentDir))
+				} else {
+					m.deleteInput.SetValue("")
+					m.state = stateBrowser
+					return m, nil
+				}
+			case tea.KeyEsc:
+				m.fileToDelete = ""
+				m.state = stateBrowser
+				m.deleteInput.Blur()
+			case tea.KeyCtrlC:
+				return m, tea.Quit
+			}
+			m.deleteInput, cmd = m.deleteInput.Update(msg)
+			return m, cmd
+
 		case stateTemplateSelect:
 			switch msg.String() {
 			case "enter":
@@ -1003,40 +1080,66 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 
 		case stateSearch:
-			switch msg.Type {
-			case tea.KeyEsc:
+			switch msg.String() {
+			case "esc":
 				m.state = stateBrowser
 				m.searchInput.Blur()
+				m.searchQuery = ""
 				return m, nil
-			case tea.KeyEnter:
+			case "enter":
+				if m.searchInput.Focused() {
+					m.searchInput, cmd = m.searchInput.Update(msg)
+					cmds = append(cmds, cmd)
+					return m, tea.Batch(cmds...)
+				}
 				if i, ok := m.searchList.SelectedItem().(item); ok {
 					m.state = stateBrowser
 					m.currentDir = filepath.Dir(i.path)
-					m.fileToSelect = i.path // Track file to select after refresh
-					// Jump to dir, refresh, and show preview
+					m.fileToSelect = i.path
 					cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
 					return m, tea.Batch(cmds...)
 				}
-			case tea.KeyDown, tea.KeyUp, tea.KeyPgDown, tea.KeyPgUp:
+			case "d":
+				if m.searchInput.Focused() {
+					m.searchInput, cmd = m.searchInput.Update(msg)
+					cmds = append(cmds, cmd)
+					return m, tea.Batch(cmds...)
+				}
+				if i, ok := m.searchList.SelectedItem().(item); ok && !i.isDir {
+					m.fileToDelete = i.path
+					m.state = stateConfirmDelete
+					m.deleteInput.Focus()
+					m.deleteInput.SetValue("")
+					return m, textinput.Blink
+				}
+			case "up", "k":
+				if m.searchInput.Focused() {
+					m.searchInput, cmd = m.searchInput.Update(msg)
+					cmds = append(cmds, cmd)
+					return m, tea.Batch(cmds...)
+				}
 				m.searchList, cmd = m.searchList.Update(msg)
 				cmds = append(cmds, cmd)
-				// Update preview based on search list selection
-				if m.searchList.SelectedItem() != nil {
-					selPath := m.searchList.SelectedItem().(item).path
-					if selPath != m.selectedFile {
-						previewCmd := m.updatePreview()
-						if previewCmd != nil {
-							cmds = append(cmds, previewCmd)
-						}
-					}
-				}
 				return m, tea.Batch(cmds...)
+			case "down", "j":
+				if m.searchInput.Focused() {
+					m.searchInput, cmd = m.searchInput.Update(msg)
+					cmds = append(cmds, cmd)
+					return m, tea.Batch(cmds...)
+				}
+				m.searchList, cmd = m.searchList.Update(msg)
+				cmds = append(cmds, cmd)
+				return m, tea.Batch(cmds...)
+
 			default:
-				// Type in search input
 				m.searchInput, cmd = m.searchInput.Update(msg)
 				cmds = append(cmds, cmd)
-				// Trigger search command
+				m.searchQuery = m.searchInput.Value()
 				cmds = append(cmds, m.searchCmd(m.searchInput.Value()))
+				previewCmd := m.updatePreview()
+				if previewCmd != nil {
+					cmds = append(cmds, previewCmd)
+				}
 				return m, tea.Batch(cmds...)
 			}
 		}
@@ -1096,6 +1199,14 @@ func (m model) View() string {
 			lipgloss.Center, lipgloss.Center,
 			inputStyle.Render(
 				fmt.Sprintf("%s\n\n%s", title, m.textInput.View()),
+			),
+		)
+
+	case stateConfirmDelete:
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			inputStyle.Render(
+				fmt.Sprintf("Delete file?\n\n%s\n\n%s", filepath.Base(m.fileToDelete), m.deleteInput.View()),
 			),
 		)
 
