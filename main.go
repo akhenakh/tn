@@ -424,17 +424,31 @@ type model struct {
 }
 
 func (m *model) updateFileListTitle() {
+	sortIndicator := ""
+	switch m.sortBy {
+	case sortAlpha:
+		sortIndicator = "A"
+	case sortTime:
+		sortIndicator = "T"
+	case sortSize:
+		sortIndicator = "S"
+	}
+
+	reverseIndicator := "↑"
+	if m.reverseSort {
+		reverseIndicator = "↓"
+	}
+
 	if m.currentDir == m.config.BaseDoc {
-		m.fileList.Title = "TOP"
+		m.fileList.Title = fmt.Sprintf("TOP [%s%s]", sortIndicator, reverseIndicator)
 	} else {
-		m.fileList.Title = filepath.Base(m.currentDir)
+		m.fileList.Title = fmt.Sprintf("%s [%s%s]", filepath.Base(m.currentDir), sortIndicator, reverseIndicator)
 	}
 }
 
 func initialModel(cfg Config, db *sql.DB) model {
 	// Initialize File Browser List
 	l := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
-	l.Title = "TOP" // Will be updated to current directory name
 	l.SetShowHelp(false)
 	l.DisableQuitKeybindings()
 
@@ -975,6 +989,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Async Data handling
 	case filesRefreshedMsg:
+		m.updateFileListTitle()
 		m.fileList.SetItems(msg)
 		// If we have a file to select (from search), find and select it
 		if m.fileToSelect != "" {
