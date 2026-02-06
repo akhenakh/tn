@@ -525,7 +525,7 @@ func (m model) syncDatabaseCmd() tea.Cmd {
 			if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != m.config.BaseDoc {
 				return fs.SkipDir
 			}
-			if !d.IsDir() && strings.HasSuffix(d.Name(), ".md") && !strings.HasPrefix(d.Name(), ".") {
+			if !d.IsDir() && (strings.HasSuffix(d.Name(), ".md") || strings.HasSuffix(d.Name(), ".markdown") || strings.HasSuffix(d.Name(), ".txt")) && !strings.HasPrefix(d.Name(), ".") {
 				if err := indexFile(m.db, path); err != nil {
 					log.Printf("Failed to index %s: %v", path, err)
 				}
@@ -568,7 +568,7 @@ func (m model) deferredSyncDatabaseCmd() tea.Cmd {
 				if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != m.config.BaseDoc {
 					return fs.SkipDir
 				}
-				if !d.IsDir() && strings.HasSuffix(d.Name(), ".md") && !strings.HasPrefix(d.Name(), ".") {
+				if !d.IsDir() && (strings.HasSuffix(d.Name(), ".md") || strings.HasSuffix(d.Name(), ".markdown") || strings.HasSuffix(d.Name(), ".txt")) && !strings.HasPrefix(d.Name(), ".") {
 					if err := indexFile(m.db, path); err != nil {
 						log.Printf("Failed to index %s: %v", path, err)
 					}
@@ -590,7 +590,7 @@ func (m *model) loadTemplates() {
 	entries, _ := os.ReadDir(m.config.TemplatesDir)
 	var items []list.Item
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") && !strings.HasPrefix(e.Name(), ".") {
+		if !e.IsDir() && (strings.HasSuffix(e.Name(), ".md") || strings.HasSuffix(e.Name(), ".markdown") || strings.HasSuffix(e.Name(), ".txt")) && !strings.HasPrefix(e.Name(), ".") {
 			items = append(items, item{
 				title: e.Name(),
 				desc:  "Template",
@@ -637,8 +637,8 @@ func (m *model) updatePreview() tea.Cmd {
 		return nil
 	}
 
-	if !strings.HasSuffix(strings.ToLower(i.path), ".md") {
-		m.viewport.SetContent(infoStyle.Render(fmt.Sprintf("%s\n\nNot a markdown file.", filepath.Base(i.path))))
+	if !strings.HasSuffix(strings.ToLower(i.path), ".md") && !strings.HasSuffix(strings.ToLower(i.path), ".markdown") && !strings.HasSuffix(strings.ToLower(i.path), ".txt") {
+		m.viewport.SetContent(infoStyle.Render(fmt.Sprintf("%s\n\nNot a supported file type.", filepath.Base(i.path))))
 		return nil
 	}
 
@@ -955,7 +955,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			case tea.KeyEnter:
 				filename := m.textInput.Value()
-				if !strings.HasSuffix(filename, ".md") {
+				if !strings.HasSuffix(filename, ".md") && !strings.HasSuffix(filename, ".markdown") && !strings.HasSuffix(filename, ".txt") {
 					filename += ".md"
 				}
 				fullPath := filepath.Join(m.currentDir, filename)
