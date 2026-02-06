@@ -305,13 +305,15 @@ Navigation:
   esc, q         Quit application
 
 Actions:
-  ctrl+n         Create new note
-  ctrl+t         Create note from template
-  ctrl+f         Search notes
-  c              Create directory
-  r              Rename file/directory
-  d              Delete file
-  ?              Show/hide this help
+   ctrl+n         Create new note
+   ctrl+t         Create note from template
+   ctrl+f         Search notes
+   c              Create directory
+   f              Rename file/directory
+   d              Delete file
+   s              Cycle sort (alpha, time, size)
+   r              Reverse order
+   ?              Show/hide this help
 
 Search Mode:
   d              Delete file
@@ -336,11 +338,13 @@ Delete Confirmation:
 type item struct {
 	title, desc, path string
 	isDir             bool
+	info              os.FileInfo
 }
 
-func (i item) Title() string       { return i.title }
-func (i item) Description() string { return i.desc }
-func (i item) FilterValue() string { return i.title }
+func (i item) Title() string         { return i.title }
+func (i item) Description() string   { return i.desc }
+func (i item) FilterValue() string   { return i.title }
+func (i item) pathInfo() os.FileInfo { return i.info }
 
 type appState int
 
@@ -365,6 +369,18 @@ type deleteConfirmedMsg bool
 // Background Scan Messages
 type scanCompleteMsg struct{}
 type scanTickMsg time.Time
+
+// Sort order types
+type sortOrder int
+
+const (
+	sortAlpha sortOrder = iota
+	sortTime
+	sortSize
+)
+
+// Messages
+type sortOrderChangedMsg struct{}
 
 // previewRenderMsg carries async preview rendering result
 type previewRenderMsg struct {
@@ -403,6 +419,8 @@ type model struct {
 	renderID         int    // Incremental ID to track current render request
 	showHelp         bool   // Track if help is being shown
 	searchQuery      string // Current search query for highlighting
+	sortBy           sortOrder
+	reverseSort      bool
 }
 
 func (m *model) updateFileListTitle() {
@@ -467,6 +485,8 @@ func initialModel(cfg Config, db *sql.DB) model {
 		searchInput:  si,
 		deleteInput:  di,
 		currentDir:   cfg.BaseDoc,
+		sortBy:       sortAlpha,
+		reverseSort:  false,
 	}
 }
 
@@ -545,7 +565,8 @@ func (m model) refreshFileListCmd(dir string) tea.Cmd {
 			parent := filepath.Dir(dir)
 			// Only allow navigation up if parent is still within or equal to base directory
 			if parent == m.config.BaseDoc || strings.HasPrefix(parent, m.config.BaseDoc+string(filepath.Separator)) {
-				items = append(items, item{title: "..", desc: "Go Back", path: parent, isDir: true})
+				parentInfo, _ := os.Stat(parent)
+				items = append(items, item{title: "..", desc: "Go Back", path: parent, isDir: true, info: parentInfo})
 			}
 		}
 
@@ -572,6 +593,7 @@ func (m model) refreshFileListCmd(dir string) tea.Cmd {
 				desc:  desc,
 				path:  filepath.Join(dir, e.Name()),
 				isDir: e.IsDir(),
+				info:  info,
 			}
 
 			if e.IsDir() {
@@ -581,19 +603,49 @@ func (m model) refreshFileListCmd(dir string) tea.Cmd {
 			}
 		}
 
-		// Sort directories and files alphabetically
-		sort.Slice(dirs, func(i, j int) bool {
-			return dirs[i].(item).title < dirs[j].(item).title
-		})
-		sort.Slice(files, func(i, j int) bool {
-			return files[i].(item).title < files[j].(item).title
-		})
-
 		// Combine: directories first, then files
 		items = append(items, dirs...)
 		items = append(items, files...)
+
+		// Apply sorting
+		m.sortItems(items)
+
 		log.Printf("refreshFileListCmd took %v for %d items", time.Since(start), len(items))
 		return filesRefreshedMsg(items)
+	}
+}
+
+// refreshFileListCmd sorts the file list based on current sort settings
+func (m *model) sortItems(items []list.Item) {
+	switch m.sortBy {
+	case sortTime:
+		sort.Slice(items, func(i, j int) bool {
+			infoI := items[i].(item).pathInfo()
+			infoJ := items[j].(item).pathInfo()
+			if m.reverseSort {
+				return infoI.ModTime().After(infoJ.ModTime())
+			}
+			return infoI.ModTime().Before(infoJ.ModTime())
+		})
+	case sortSize:
+		sort.Slice(items, func(i, j int) bool {
+			infoI := items[i].(item).pathInfo()
+			infoJ := items[j].(item).pathInfo()
+			if m.reverseSort {
+				return infoI.Size() > infoJ.Size()
+			}
+			return infoI.Size() < infoJ.Size()
+		})
+	default:
+		if m.reverseSort {
+			sort.Slice(items, func(i, j int) bool {
+				return items[i].(item).title > items[j].(item).title
+			})
+		} else {
+			sort.Slice(items, func(i, j int) bool {
+				return items[i].(item).title < items[j].(item).title
+			})
+		}
 	}
 }
 
@@ -1032,7 +1084,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textInput.SetValue("")
 				m.textInput.Placeholder = "New directory name"
 				return m, nil
-			case "r": // Rename
+			case "f": // Rename
 				if i, ok := m.fileList.SelectedItem().(item); ok {
 					m.fileToRename = i.path
 					m.state = stateRename
@@ -1059,6 +1111,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.deleteInput.SetValue("")
 					return m, textinput.Blink
 				}
+			case "s": // Cycle sort order
+				m.sortBy = (m.sortBy + 1) % 3
+				cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
+				return m, tea.Batch(cmds...)
+			case "r": // Reverse order
+				m.reverseSort = !m.reverseSort
+				cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
+				return m, tea.Batch(cmds...)
 
 			// Navigation
 			case "enter":
