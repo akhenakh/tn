@@ -528,7 +528,17 @@ func (m *model) updatePreview() tea.Cmd {
 	i := sel.(item)
 
 	// Skip if file hasn't changed and not currently loading
+	// For search mode, be less restrictive to ensure navigation works properly
 	if i.path == m.selectedFile && !m.previewLoading && m.viewport.View() != "" {
+		// In search mode, always allow preview updates when navigating
+		if m.state == stateSearch {
+			// Force update if we're navigating in search mode
+			m.viewport.SetContent(infoStyle.Render("Loading preview..."))
+			m.previewLoading = true
+			m.renderID++
+			currentID := m.renderID
+			return m.renderPreviewCmd(i.path, currentID, m.renderer)
+		}
 		return nil
 	}
 
@@ -883,6 +893,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case tea.KeyDown, tea.KeyUp, tea.KeyPgDown, tea.KeyPgUp:
 				m.searchList, cmd = m.searchList.Update(msg)
+				cmds = append(cmds, cmd)
 				// Update preview based on search list selection
 				if m.searchList.SelectedItem() != nil {
 					selPath := m.searchList.SelectedItem().(item).path
@@ -893,7 +904,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 				}
-				return m, cmd
+				return m, tea.Batch(cmds...)
 			default:
 				// Type in search input
 				m.searchInput, cmd = m.searchInput.Update(msg)
