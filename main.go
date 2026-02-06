@@ -802,10 +802,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if cleanItemPath == cleanBase || strings.HasPrefix(cleanItemPath, cleanBase) {
 							m.currentDir = i.path
 							m.fileList.ResetSelected()
+							m.fileList.ResetFilter()
 							cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
 							return m, tea.Batch(cmds...)
 						}
 					} else {
+						m.fileList.ResetFilter()
 						return m, openEditor(i.path)
 					}
 				}
@@ -819,10 +821,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if cleanItemPath == cleanBase || strings.HasPrefix(cleanItemPath, cleanBase) {
 							m.currentDir = i.path
 							m.fileList.ResetSelected()
+							m.fileList.ResetFilter()
 							cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
 							return m, tea.Batch(cmds...)
 						}
 					} else {
+						m.fileList.ResetFilter()
 						return m, openEditor(i.path)
 					}
 				}
