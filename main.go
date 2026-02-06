@@ -405,10 +405,18 @@ type model struct {
 	searchQuery      string // Current search query for highlighting
 }
 
+func (m *model) updateFileListTitle() {
+	if m.currentDir == m.config.BaseDoc {
+		m.fileList.Title = "TOP"
+	} else {
+		m.fileList.Title = filepath.Base(m.currentDir)
+	}
+}
+
 func initialModel(cfg Config, db *sql.DB) model {
 	// Initialize File Browser List
 	l := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
-	l.Title = "Files"
+	l.Title = "TOP" // Will be updated to current directory name
 	l.SetShowHelp(false)
 	l.DisableQuitKeybindings()
 
@@ -758,10 +766,9 @@ func (m model) renderPreviewCmd(path string, width int, id int) tea.Cmd {
 		}
 
 		renderer, err := glamour.NewTermRenderer(
+			glamour.WithStandardStyle("dark"), // Explicitly set style to ensure rendering
 			glamour.WithWordWrap(safeWidth),
 			glamour.WithPreservedNewLines(),
-			// Use standard style to avoid potentially slow auto-detection in goroutine
-			// or rely on environment variables which Glamour handles.
 		)
 
 		var str string
@@ -1063,6 +1070,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Only navigate into directory if it's within base directory
 						if cleanItemPath == cleanBase || strings.HasPrefix(cleanItemPath, cleanBase) {
 							m.currentDir = i.path
+							m.updateFileListTitle()
 							m.fileList.ResetSelected()
 							m.fileList.ResetFilter()
 							cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
@@ -1082,6 +1090,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Only navigate into directory if it's within base directory
 						if cleanItemPath == cleanBase || strings.HasPrefix(cleanItemPath, cleanBase) {
 							m.currentDir = i.path
+							m.updateFileListTitle()
 							m.fileList.ResetSelected()
 							m.fileList.ResetFilter()
 							cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
@@ -1101,6 +1110,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Only navigate up if parent is still within or equal to base directory
 					if cleanParent == cleanBase || strings.HasPrefix(cleanParent, cleanBase) {
 						m.currentDir = parent
+						m.updateFileListTitle()
 						m.fileList.ResetSelected()
 						cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
 						return m, tea.Batch(cmds...)
@@ -1254,6 +1264,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if i, ok := m.searchList.SelectedItem().(item); ok {
 					m.state = stateBrowser
 					m.currentDir = filepath.Dir(i.path)
+					m.updateFileListTitle()
 					m.fileToSelect = i.path
 					cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
 					return m, tea.Batch(cmds...)
