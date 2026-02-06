@@ -809,7 +809,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateBrowser:
 			// If filtering, bubbles/list handles input
 			if m.fileList.FilterState() == list.Filtering {
-				break
+				// Let the list component handle all input when filtering
+				m.fileList, cmd = m.fileList.Update(msg)
+				cmds = append(cmds, cmd)
+
+				if m.fileList.SelectedItem() != nil {
+					selPath := m.fileList.SelectedItem().(item).path
+					if selPath != m.selectedFile {
+						previewCmd := m.updatePreview()
+						if previewCmd != nil {
+							cmds = append(cmds, previewCmd)
+						}
+					}
+				}
+				m.viewport, cmd = m.viewport.Update(msg)
+				cmds = append(cmds, cmd)
+				return m, tea.Batch(cmds...)
 			}
 
 			switch msg.String() {
