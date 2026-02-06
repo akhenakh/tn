@@ -253,6 +253,12 @@ type indexingFinishedMsg struct{}
 type previewRenderMsg struct {
 	content string
 	path    string
+	id      int // To track if this is the most recent render request
+}
+
+// sharedRendererReadyMsg notifies when the shared renderer is initialized
+type sharedRendererReadyMsg struct {
+	renderer *glamour.TermRenderer
 }
 
 // --- Model ---
@@ -271,13 +277,15 @@ type model struct {
 	searchInput  textinput.Model
 
 	// Logic state
-	currentDir      string
-	selectedFile    string
-	pendingTemplate string
-	width, height   int
-	renderer        *glamour.TermRenderer
-	fileToSelect    string // Track file to select after directory refresh
-	previewLoading  bool   // Track if preview is being rendered
+	currentDir           string
+	selectedFile         string
+	pendingTemplate      string
+	width, height        int
+	renderer             *glamour.TermRenderer
+	fileToSelect         string // Track file to select after directory refresh
+	previewLoading       bool   // Track if preview is being rendered
+	renderID             int    // Incremental ID to track current render request
+	rendererInitializing bool   // Track if shared renderer is being created
 }
 
 func initialModel(cfg Config, db *sql.DB) model {
@@ -328,11 +336,30 @@ func initialModel(cfg Config, db *sql.DB) model {
 
 func (m model) Init() tea.Cmd {
 	// Batch commands: start blinking cursor, refresh current dir, and start background indexing
+	// Also start initializing the shared renderer in background
 	return tea.Batch(
 		textinput.Blink,
 		m.refreshFileListCmd(m.currentDir),
 		m.syncDatabaseCmd(),
+		m.initSharedRendererCmd(),
 	)
+}
+
+// initSharedRendererCmd creates the shared renderer asynchronously
+func (m model) initSharedRendererCmd() tea.Cmd {
+	return func() tea.Msg {
+		start := time.Now()
+		renderer, err := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(80),
+		)
+		if err != nil {
+			log.Printf("Failed to create shared renderer: %v", err)
+			return sharedRendererReadyMsg{renderer: nil}
+		}
+		log.Printf("Shared renderer created in %v", time.Since(start))
+		return sharedRendererReadyMsg{renderer: renderer}
+	}
 }
 
 // --- Commands (Async operations) ---
@@ -514,49 +541,65 @@ func (m *model) updatePreview() tea.Cmd {
 		return nil
 	}
 
+	// Check if renderer is ready
+	if m.renderer == nil {
+		if !m.rendererInitializing {
+			// Start initializing the renderer
+			m.rendererInitializing = true
+			return m.initSharedRendererCmd()
+		}
+		// Renderer is initializing, show raw content for now
+		content, err := os.ReadFile(i.path)
+		if err != nil {
+			m.viewport.SetContent(infoStyle.Render("Error reading file"))
+		} else {
+			m.viewport.SetContent(string(content))
+		}
+		return nil
+	}
+
 	// Show loading state and render asynchronously
 	m.previewLoading = true
 	m.viewport.SetContent(infoStyle.Render("Loading preview..."))
 
-	return m.renderPreviewCmd(i.path)
+	// Increment render ID to track this request
+	m.renderID++
+	currentID := m.renderID
+
+	return m.renderPreviewCmd(i.path, currentID, m.renderer)
 }
 
-// renderPreviewCmd renders markdown content asynchronously
-func (m model) renderPreviewCmd(path string) tea.Cmd {
+// renderPreviewCmd renders markdown content asynchronously using shared renderer
+func (m model) renderPreviewCmd(path string, id int, renderer *glamour.TermRenderer) tea.Cmd {
 	return func() tea.Msg {
 		start := time.Now()
 
 		content, err := os.ReadFile(path)
 		if err != nil {
 			log.Printf("Error reading file for preview %s: %v", path, err)
-			return previewRenderMsg{content: infoStyle.Render("Error reading file"), path: path}
+			return previewRenderMsg{content: infoStyle.Render("Error reading file"), path: path, id: id}
 		}
 		readDuration := time.Since(start)
 
-		renderStart := time.Now()
-
-		// Create renderer - this can be slow on first run (17+ seconds!)
-		renderer, err := glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
-			glamour.WithWordWrap(80),
-		)
-		if err != nil {
-			log.Printf("Failed to create renderer: %v", err)
-			return previewRenderMsg{content: string(content), path: path}
+		// Use shared renderer - should already be initialized
+		if renderer == nil {
+			// Renderer not ready yet, show raw content
+			return previewRenderMsg{content: string(content), path: path, id: id}
 		}
 
+		renderStart := time.Now()
 		str, err := renderer.Render(string(content))
 		renderDuration := time.Since(renderStart)
 
 		if err != nil {
 			log.Printf("Glamour render error: %v", err)
-			return previewRenderMsg{content: string(content), path: path}
+			return previewRenderMsg{content: string(content), path: path, id: id}
 		}
 
 		log.Printf("Preview Render: %s | Read: %v | Render: %v | Total: %v",
 			filepath.Base(path), readDuration, renderDuration, time.Since(start))
 
-		return previewRenderMsg{content: str, path: path}
+		return previewRenderMsg{content: str, path: path, id: id}
 	}
 }
 
@@ -670,11 +713,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case indexingFinishedMsg:
 		log.Println("Indexing finished notification received")
 
-	case previewRenderMsg:
-		if msg.path == m.selectedFile {
-			m.viewport.SetContent(msg.content)
+	case sharedRendererReadyMsg:
+		if msg.renderer != nil {
+			m.renderer = msg.renderer
+			log.Println("Shared renderer ready and assigned to model")
+			// Trigger preview update with the new renderer
+			cmd = m.updatePreview()
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		} else {
+			log.Println("Shared renderer initialization failed")
 		}
-		m.previewLoading = false
+		m.rendererInitializing = false
+
+	case previewRenderMsg:
+		// Only update if this is the most recent render request
+		if msg.id == m.renderID {
+			m.viewport.SetContent(msg.content)
+			m.previewLoading = false
+		}
+		// Otherwise, this is an outdated render result, ignore it
 
 	case tea.KeyMsg:
 		// Global Keys
