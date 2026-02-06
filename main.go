@@ -375,10 +375,13 @@ func (m model) refreshFileListCmd(dir string) tea.Cmd {
 		}
 
 		var items []list.Item
-		// Add ".." if not at root
+		// Add ".." if not at root and not already at base directory
 		if dir != m.config.BaseDoc {
 			parent := filepath.Dir(dir)
-			items = append(items, item{title: "..", desc: "Go Back", path: parent, isDir: true})
+			// Only allow navigation up if parent is still within or equal to base directory
+			if parent == m.config.BaseDoc || strings.HasPrefix(parent, m.config.BaseDoc+string(filepath.Separator)) {
+				items = append(items, item{title: "..", desc: "Go Back", path: parent, isDir: true})
+			}
 		}
 
 		for _, e := range entries {
@@ -770,21 +773,53 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, textinput.Blink
 
 			// Navigation
-			case "enter", "right", "l":
+			case "enter":
 				if i, ok := m.fileList.SelectedItem().(item); ok {
 					if i.isDir {
-						m.currentDir = i.path
-						m.fileList.ResetSelected()
-						cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
+						// Normalize paths for comparison
+						cleanItemPath := filepath.Clean(i.path)
+						cleanBase := filepath.Clean(m.config.BaseDoc)
+						// Only navigate into directory if it's within base directory
+						if cleanItemPath == cleanBase || strings.HasPrefix(cleanItemPath, cleanBase) {
+							m.currentDir = i.path
+							m.fileList.ResetSelected()
+							cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
+							return m, tea.Batch(cmds...)
+						}
+					} else {
+						return m, openEditor(i.path)
+					}
+				}
+			case "l", "right":
+				if i, ok := m.fileList.SelectedItem().(item); ok {
+					if i.isDir {
+						// Normalize paths for comparison
+						cleanItemPath := filepath.Clean(i.path)
+						cleanBase := filepath.Clean(m.config.BaseDoc)
+						// Only navigate into directory if it's within base directory
+						if cleanItemPath == cleanBase || strings.HasPrefix(cleanItemPath, cleanBase) {
+							m.currentDir = i.path
+							m.fileList.ResetSelected()
+							cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
+							return m, tea.Batch(cmds...)
+						}
 					} else {
 						return m, openEditor(i.path)
 					}
 				}
 			case "left", "h":
 				if m.currentDir != m.config.BaseDoc {
-					m.currentDir = filepath.Dir(m.currentDir)
-					m.fileList.ResetSelected()
-					cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
+					parent := filepath.Dir(m.currentDir)
+					// Normalize paths for comparison by cleaning them
+					cleanParent := filepath.Clean(parent)
+					cleanBase := filepath.Clean(m.config.BaseDoc)
+					// Only navigate up if parent is still within or equal to base directory
+					if cleanParent == cleanBase || strings.HasPrefix(cleanParent, cleanBase) {
+						m.currentDir = parent
+						m.fileList.ResetSelected()
+						cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
+						return m, tea.Batch(cmds...)
+					}
 				}
 			}
 
@@ -872,8 +907,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Default updates based on state
 	if m.state == stateBrowser {
-		m.fileList, cmd = m.fileList.Update(msg)
-		cmds = append(cmds, cmd)
+		// Only update the list if this is not a navigation key we've already handled
+		if keyMsg, isKey := msg.(tea.KeyMsg); !isKey || (keyMsg.String() != "enter" && keyMsg.String() != "l" && keyMsg.String() != "right" && keyMsg.String() != "left" && keyMsg.String() != "h") {
+			m.fileList, cmd = m.fileList.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 
 		if m.fileList.SelectedItem() != nil {
 			selPath := m.fileList.SelectedItem().(item).path
