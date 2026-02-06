@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
 	"time"
@@ -372,6 +373,10 @@ func (m model) refreshFileListCmd(dir string) tea.Cmd {
 			}
 		}
 
+		// Separate directories and files
+		var dirs []list.Item
+		var files []list.Item
+
 		for _, e := range entries {
 			// Skip hidden files/dirs
 			if strings.HasPrefix(e.Name(), ".") {
@@ -379,20 +384,38 @@ func (m model) refreshFileListCmd(dir string) tea.Cmd {
 			}
 
 			info, _ := e.Info()
-			desc := "File"
+			var desc string
 			if e.IsDir() {
 				desc = "Directory"
 			} else {
 				desc = info.ModTime().Format("Jan 02 15:04")
 			}
 
-			items = append(items, item{
+			newItem := item{
 				title: e.Name(),
 				desc:  desc,
 				path:  filepath.Join(dir, e.Name()),
 				isDir: e.IsDir(),
-			})
+			}
+
+			if e.IsDir() {
+				dirs = append(dirs, newItem)
+			} else {
+				files = append(files, newItem)
+			}
 		}
+
+		// Sort directories and files alphabetically
+		sort.Slice(dirs, func(i, j int) bool {
+			return dirs[i].(item).title < dirs[j].(item).title
+		})
+		sort.Slice(files, func(i, j int) bool {
+			return files[i].(item).title < files[j].(item).title
+		})
+
+		// Combine: directories first, then files
+		items = append(items, dirs...)
+		items = append(items, files...)
 		log.Printf("refreshFileListCmd took %v for %d items", time.Since(start), len(items))
 		return filesRefreshedMsg(items)
 	}
@@ -838,8 +861,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				m.state = stateBrowser
 				// Refresh list and open editor
-				cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
-				return m, openEditor(fullPath)
+				return m, tea.Batch(m.refreshFileListCmd(m.currentDir), openEditor(fullPath))
 			case tea.KeyEsc:
 				m.state = stateBrowser
 				m.textInput.Blur()
