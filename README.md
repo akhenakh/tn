@@ -1,4 +1,4 @@
-# TN - Terminal Note Manager
+# TN - Take Note
 
 A terminal-based note management application with a TUI (Text User Interface) for browsing, searching, and editing markdown notes. Built with Go and featuring full-text search powered by SQLite FTS5.
 
