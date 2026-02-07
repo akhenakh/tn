@@ -395,15 +395,25 @@ func (m *model) sortItems(items []list.Item) {
 			return infoI.Size() < infoJ.Size()
 		})
 	default:
-		if m.reverseSort {
-			sort.Slice(items, func(i, j int) bool {
-				return items[i].(item).title > items[j].(item).title
-			})
-		} else {
-			sort.Slice(items, func(i, j int) bool {
-				return items[i].(item).title < items[j].(item).title
-			})
-		}
+		// Alphabetical sort: directories first, then files
+		sort.Slice(items, func(i, j int) bool {
+			itemI := items[i].(item)
+			itemJ := items[j].(item)
+
+			// Directories always come before files
+			if itemI.isDir != itemJ.isDir {
+				if m.reverseSort {
+					return !itemI.isDir
+				}
+				return itemI.isDir
+			}
+
+			// Within same type (both dirs or both files), sort alphabetically
+			if m.reverseSort {
+				return itemI.title > itemJ.title
+			}
+			return itemI.title < itemJ.title
+		})
 	}
 }
 
