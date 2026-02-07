@@ -41,12 +41,15 @@ Template files (`.md` files) can be placed in the `templates/` directory or your
 
 - **`templates/hugo.md`** - Hugo-compatible frontmatter with TOML format
 - **`templates/daily.md`** - Simple daily note with date
+- **`templates/default.md`** - Used automatically when creating new notes with `Ctrl+N`
 
 To use these, copy them to your config templates directory:
 
 ```sh
 cp templates/*.md ~/.config/tn/templates/
 ```
+
+If `default.md` exists in the templates directory, it will be used automatically when you press `Ctrl+N` to create a new note. Otherwise, a blank note is created.
 
 Templates support Go template syntax with Sprig functions:
 
@@ -99,7 +102,7 @@ Run `tn` to start the application:
 - `Esc` - Return to file browser
 
 #### Creating Notes
-1. Press `Ctrl+N` for blank note or `Ctrl+T` to use a template
+1. Press `Ctrl+N` to create a new note (uses `default.md` template if available) or `Ctrl+T` to choose a template
 2. Enter filename (`.md` extension is added automatically)
 3. Your `$EDITOR` opens with the new file
 

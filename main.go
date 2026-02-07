@@ -1091,7 +1091,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateInputName
 				m.textInput.Focus()
 				m.textInput.SetValue("")
-				m.pendingTemplate = ""
+				defaultTemplate := filepath.Join(m.config.TemplatesDir, "default.md")
+				if _, err := os.Stat(defaultTemplate); err == nil {
+					m.pendingTemplate = defaultTemplate
+				} else {
+					m.pendingTemplate = ""
+				}
 				return m, nil
 			case "c": // Create Directory
 				m.state = stateCreateDir
