@@ -65,6 +65,7 @@ Created on {{ now | date "Monday, January 2, 2006" }}
 ```
 
 Available functions include:
+- Filename: `current_path`, `base` 
 - Date/time: `now`, `date`, `date_modify`
 - Strings: `upper`, `lower`, `title`, `trim`
 - Math: `add`, `sub`, `mul`, `div`
@@ -92,6 +93,9 @@ Run `tn` to start the application:
 - `Ctrl+T` - Create note from template
 - `Ctrl+F` - Open search
 - `d` - Delete file
+- `s` - Cycle sort (alpha, time, size)
+- `r` - Reverse order
+- `?` - Show/hide this help
 - `q` - Quit
 
 #### Search Mode
