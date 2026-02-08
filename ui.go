@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"io/fs"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/sprig/v3"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -23,6 +25,64 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// copyToClipboard handles the logic of copying text to the system clipboard
+// Returns true if successful, false otherwise
+func copyToClipboard(content string, useTermAware bool) bool {
+	if strings.TrimSpace(content) == "" {
+		return false
+	}
+
+	if useTermAware {
+		term := os.Getenv("TERM")
+		if strings.Contains(term, "kitty") || strings.Contains(term, "xterm") || os.Getenv("TMUX") != "" {
+			log.Println("Using OSC 52 escape code for clipboard")
+			encodedContent := base64.StdEncoding.EncodeToString([]byte(content))
+			if os.Getenv("TMUX") != "" {
+				fmt.Printf("\x1bPtmux;\x1b\x1b]52;c;%s\x07\x1b\\", encodedContent)
+			} else {
+				fmt.Printf("\x1b]52;c;%s\x07", encodedContent)
+			}
+			return true
+		}
+	}
+
+	if os.Getenv("KITTY_WINDOW_ID") != "" {
+		kittyPath, err := exec.LookPath("kitty")
+		if err == nil {
+			log.Println("Using kitty +kitten clipboard")
+			cmd := exec.Command(kittyPath, "+kitten", "clipboard")
+			cmd.Stdin = strings.NewReader(content)
+			if err := cmd.Run(); err == nil {
+				return true
+			}
+		}
+	}
+
+	tools := []string{"wl-copy", "xclip -selection clipboard", "xsel --clipboard"}
+	for _, tool := range tools {
+		parts := strings.Fields(tool)
+		path, err := exec.LookPath(parts[0])
+		if err != nil {
+			continue
+		}
+
+		log.Printf("Attempting clipboard copy via `%s`", tool)
+		cmd := exec.Command(path, parts[1:]...)
+		cmd.Stdin = strings.NewReader(content)
+
+		if err := cmd.Run(); err == nil {
+			return true
+		}
+	}
+
+	log.Println("Falling back to default clipboard library")
+	if err := clipboard.WriteAll(content); err != nil {
+		log.Printf("Failed to write to clipboard: %v", err)
+		return false
+	}
+	return true
+}
 
 // --- Styles & Constants ---
 
@@ -54,6 +114,16 @@ var (
 			Foreground(lipgloss.Color("241")).
 			Padding(1, 2)
 
+	notificationStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("42")).
+				Background(lipgloss.Color("0")).
+				Padding(0, 1).
+				Bold(true)
+
+	selectionStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("33")).
+			Foreground(lipgloss.Color("255"))
+
 	helpContent = `
 TN - Terminal Note Manager
 
@@ -69,6 +139,7 @@ Actions:
    ctrl+n         Create new note
    ctrl+t         Create note from template
    ctrl+f         Search notes
+   ctrl+y         Copy entire file to clipboard
    c              Create directory
    f              Rename file/directory
    d              Delete file
@@ -76,11 +147,15 @@ Actions:
    r              Reverse order
    ?              Show/hide this help
 
+Mouse:
+  Click & drag   Select text in preview pane (auto-copies)
+
 Search Mode:
   d              Delete file
   esc            Exit search mode
   Enter          Open selected search result
   ↑/↓, j/k       Navigate search results
+  ctrl+y         Copy entire file to clipboard
 
 Template Selection:
   Enter          Select template
@@ -129,6 +204,12 @@ type searchResultMsg []list.Item
 type toggleHelpMsg struct{}
 type deleteConfirmedMsg bool
 
+// Clipboard notification message - clears after timeout
+type clipboardMsg struct {
+	message string
+	clear   bool // If true, clear the notification
+}
+
 // Background Scan Messages
 type scanCompleteMsg struct{}
 type scanTickMsg time.Time
@@ -147,9 +228,10 @@ type sortOrderChangedMsg struct{}
 
 // previewRenderMsg carries async preview rendering result
 type previewRenderMsg struct {
-	content string
-	path    string
-	id      int // To track if this is the most recent render request
+	content    string
+	rawContent string // Raw file content for selection
+	path       string
+	id         int // To track if this is the most recent render request
 }
 
 type model struct {
@@ -184,6 +266,17 @@ type model struct {
 	searchQuery      string // Current search query for highlighting
 	sortBy           sortOrder
 	reverseSort      bool
+
+	// Mouse selection state
+	selecting  bool   // Whether we're currently selecting text
+	selStartX  int    // Selection start X coordinate
+	selStartY  int    // Selection start Y coordinate
+	selEndX    int    // Selection end X coordinate
+	selEndY    int    // Selection end Y coordinate
+	rawContent string // Raw file content for selection extraction
+
+	// Clipboard notification
+	clipboardNotification string // Current clipboard notification message
 }
 
 // --- Initialization & Setup ---
@@ -512,6 +605,20 @@ func (m *model) loadTemplates() {
 	log.Printf("loadTemplates took %v", time.Since(start))
 }
 
+// clipboardNotificationCmd returns a command that clears the clipboard notification after a timeout
+func clipboardNotificationCmd() tea.Cmd {
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return clipboardMsg{clear: true}
+	})
+}
+
+// resetSelection clears the current selection state
+func (m *model) resetSelection() {
+	m.selecting = false
+	m.selStartY = 0
+	m.selEndY = 0
+}
+
 func (m *model) updatePreview() tea.Cmd {
 	sel := m.fileList.SelectedItem()
 	if m.state == stateSearch {
@@ -611,7 +718,7 @@ func (m model) renderPreviewCmd(path string, width int, id int) tea.Cmd {
 		log.Printf("Preview Render: %s | Read: %v | Render: %v | Total: %v",
 			filepath.Base(path), readDuration, renderDuration, time.Since(start))
 
-		return previewRenderMsg{content: highlightedContent, path: path, id: id}
+		return previewRenderMsg{content: highlightedContent, rawContent: string(content), path: path, id: id}
 	}
 }
 
@@ -678,6 +785,153 @@ func highlightMatches(text, query string) string {
 	// Highlight matches with ANSI escape codes for red background
 	// Red background (41) with white text (37)
 	return re.ReplaceAllString(text, "\x1b[37;41m$1\x1b[0m")
+}
+
+// stripANSI removes ANSI escape codes from text
+func stripANSI(text string) string {
+	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	return ansiRegex.ReplaceAllString(text, "")
+}
+
+// getSelectedText extracts the selected text from viewport content based on line numbers
+// startY and endY are 0-indexed line numbers relative to the viewport content
+func getSelectedText(viewportContent string, startY, endY int) string {
+	lines := strings.Split(viewportContent, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+
+	// Normalize selection coordinates (handle selecting backwards)
+	if startY > endY {
+		startY, endY = endY, startY
+	}
+
+	// Clamp to valid range
+	if startY < 0 {
+		startY = 0
+	}
+	if endY >= len(lines) {
+		endY = len(lines) - 1
+	}
+	if startY >= len(lines) {
+		return ""
+	}
+
+	// Extract selected lines and strip ANSI codes
+	var selectedLines []string
+	for i := startY; i <= endY && i < len(lines); i++ {
+		cleanLine := stripANSI(lines[i])
+		selectedLines = append(selectedLines, cleanLine)
+	}
+	return strings.Join(selectedLines, "\n")
+}
+
+// isInPreviewPane checks if the given coordinates are within the preview pane
+func (m model) isInPreviewPane(x, y int) bool {
+	// Calculate the left edge of the preview pane
+	listOuterWidth := int(float64(m.width) * 0.30)
+	if listOuterWidth < 20 {
+		listOuterWidth = 20
+	}
+
+	// Check if x is within the preview pane
+	// Preview pane starts at listOuterWidth and goes to m.width
+	if x < listOuterWidth || x >= m.width {
+		return false
+	}
+
+	// Check if y is within the viewport (accounting for docStyle margin)
+	// docStyle has Margin(1, 2) so content starts at y=1
+	if y < 1 || y >= m.height-1 {
+		return false
+	}
+
+	return true
+}
+
+// screenToViewport converts screen Y coordinate to viewport line index
+// Returns the line index within the visible viewport content (0-indexed)
+func (m model) screenToViewport(screenX, screenY int) (contentY int) {
+	// Calculate offset from top of viewport
+	// previewStyle has Border(2) + Padding(2)
+	// Top border takes 1 line. Top padding is 0.
+	// Offset = 1
+	const offset = 1
+	contentY = screenY - offset
+	if contentY < 0 {
+		contentY = 0
+	}
+
+	// Get visible viewport lines to clamp to valid range
+	visibleLines := strings.Split(m.viewport.View(), "\n")
+	if contentY >= len(visibleLines) {
+		contentY = len(visibleLines) - 1
+		if contentY < 0 {
+			contentY = 0
+		}
+	}
+
+	return contentY
+}
+
+// renderViewportWithSelection renders the viewport content with selection highlighting
+func (m model) renderViewportWithSelection() string {
+	content := m.viewport.View()
+
+	// Check if we have a selection to display
+	hasSelection := m.selecting || m.selStartY != m.selEndY
+	if !hasSelection {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 {
+		return content
+	}
+
+	// Determine selection range
+	startY, endY := m.selStartY, m.selEndY
+	if startY > endY {
+		startY, endY = endY, startY
+	}
+
+	// Clamp to valid range
+	if startY < 0 {
+		startY = 0
+	}
+	if endY >= len(lines) {
+		endY = len(lines) - 1
+	}
+
+	// Apply selection highlighting by wrapping selected lines
+	// Use ANSI escape codes directly for highlighting to preserve existing formatting
+	var highlightedLines []string
+	for i, line := range lines {
+		if i >= startY && i <= endY {
+			// This line is selected - apply background color
+			// \x1b[48;5;33m = blue background (33 from selectionStyle)
+			// \x1b[38;5;255m = white foreground (255 from selectionStyle)
+			// \x1b[0m = reset
+			// Note: Existing formatting in the line (e.g. from Glamour) will use \x1b[0m to reset.
+			// This would clear our background. We must replace all resets in the line
+			// with reset + re-apply selection style.
+
+			highlightStart := "\x1b[48;5;33;38;5;255m"
+			highlightReset := "\x1b[0m"
+
+			// Replace existing resets with reset+highlight
+			// Catch both \x1b[0m and \x1b[m
+			modifiedLine := strings.ReplaceAll(line, "\x1b[0m", "\x1b[0m"+highlightStart)
+			modifiedLine = strings.ReplaceAll(modifiedLine, "\x1b[m", "\x1b[m"+highlightStart)
+
+			// Wrap the whole line
+			highlightedLines = append(highlightedLines, highlightStart+modifiedLine+highlightReset)
+		} else {
+			highlightedLines = append(highlightedLines, line)
+		}
+	}
+
+	return strings.Join(highlightedLines, "\n")
 }
 
 func openEditor(path string) tea.Cmd {
@@ -795,7 +1049,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
-		// Async Data handling
+		// Mouse events for text selection in preview pane
+	case tea.MouseMsg:
+		// Only handle mouse in browser or search states where preview is visible
+		if m.state != stateBrowser && m.state != stateSearch {
+			break
+		}
+
+		switch msg.Type {
+		case tea.MouseLeft:
+			if m.isInPreviewPane(msg.X, msg.Y) {
+				y := m.screenToViewport(msg.X, msg.Y)
+				// Only reset the start position if we aren't already selecting (dragging)
+				// This handles terminals that send repeated MouseLeft events during drag
+				if !m.selecting {
+					m.selecting = true
+					m.selStartY = y
+				}
+				m.selEndY = y
+				return m, nil
+			}
+
+		case tea.MouseRelease:
+			if m.selecting {
+				m.selecting = false
+				// Auto-copy selected text to clipboard from viewport (what user sees)
+				viewportContent := m.viewport.View()
+				selectedText := getSelectedText(viewportContent, m.selStartY, m.selEndY)
+				if strings.TrimSpace(selectedText) != "" {
+					if copyToClipboard(selectedText, true) {
+						m.clipboardNotification = fmt.Sprintf("Copied %d lines to clipboard", m.selEndY-m.selStartY+1)
+						cmds = append(cmds, clipboardNotificationCmd())
+					}
+				}
+				return m, tea.Batch(cmds...)
+			}
+
+		case tea.MouseMotion:
+			// Handle mouse motion (dragging) for selection
+			if m.selecting {
+				newEndY := m.screenToViewport(msg.X, msg.Y)
+				if newEndY != m.selEndY {
+					m.selEndY = newEndY
+					// Force a re-render by returning the model
+					return m, nil
+				}
+			}
+		}
+
+	// Async Data handling
 	case filesRefreshedMsg:
 		m.updateFileListTitle()
 		m.fileList.SetItems(msg)
@@ -846,11 +1148,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Trigger the next background scan
 		return m, m.startBackgroundScan()
 
+	case clipboardMsg:
+		if msg.clear {
+			m.clipboardNotification = ""
+		} else {
+			m.clipboardNotification = msg.message
+		}
+		return m, nil
+
 	case previewRenderMsg:
 		// Only update if this is the most recent render request
 		if msg.id == m.renderID {
 			m.viewport.SetContent(msg.content)
+			m.rawContent = msg.rawContent
 			m.previewLoading = false
+			// Reset selection when new content loads
+			m.resetSelection()
 		}
 	// Otherwise, this is an outdated render result, ignore it
 
@@ -895,6 +1208,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m, tea.Quit
+			case "ctrl+y": // Copy entire file to clipboard
+				if m.rawContent != "" {
+					if copyToClipboard(m.rawContent, true) {
+						m.clipboardNotification = "Copied file to clipboard"
+						cmds = append(cmds, clipboardNotificationCmd())
+					}
+				}
+				return m, tea.Batch(cmds...)
 			case "ctrl+n": // New File
 				m.state = stateInputName
 				m.textInput.Focus()
@@ -1145,6 +1466,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchInput.Blur()
 				m.searchQuery = ""
 				return m, nil
+			case "ctrl+y": // Copy entire file to clipboard
+				if m.rawContent != "" {
+					if copyToClipboard(m.rawContent, true) {
+						m.clipboardNotification = "Copied file to clipboard"
+						cmds = append(cmds, clipboardNotificationCmd())
+					}
+				}
+				return m, tea.Batch(cmds...)
 			case "enter":
 				if m.searchInput.Focused() && m.searchList.SelectedItem() == nil {
 					// If strictly focused with no selection, maybe do something else
@@ -1215,8 +1544,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		m.viewport, cmd = m.viewport.Update(msg)
-		cmds = append(cmds, cmd)
+		// Don't pass mouse events to viewport during selection to prevent scrolling interference
+		if !m.selecting {
+			m.viewport, cmd = m.viewport.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -1226,6 +1558,8 @@ func (m model) View() string {
 	if m.width == 0 {
 		return "Initializing UI..."
 	}
+
+	var mainView string
 
 	switch m.state {
 	case stateSearch:
@@ -1239,17 +1573,20 @@ func (m model) View() string {
 			inputView,
 			listView,
 		)
-		return lipgloss.JoinHorizontal(
+		// Use selection-highlighted viewport content
+		previewContent := m.renderViewportWithSelection()
+		mainView = lipgloss.JoinHorizontal(
 			lipgloss.Top,
 			leftPane,
-			previewStyle.Width(m.viewWidth).Render(m.viewport.View()),
+			// Removed .Width() constraint on previewStyle to prevent wrapping of existing content
+			previewStyle.Render(previewContent),
 		)
 
 	case stateTemplateSelect:
-		return docStyle.Render(m.templateList.View())
+		mainView = docStyle.Render(m.templateList.View())
 
 	case stateCreateDir:
-		return lipgloss.Place(m.width, m.height,
+		mainView = lipgloss.Place(m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
 			inputStyle.Render(
 				fmt.Sprintf("Create Directory\n\n%s", m.textInput.View()),
@@ -1257,7 +1594,7 @@ func (m model) View() string {
 		)
 
 	case stateRename:
-		return lipgloss.Place(m.width, m.height,
+		mainView = lipgloss.Place(m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
 			inputStyle.Render(
 				fmt.Sprintf("Rename\n\n%s", m.textInput.View()),
@@ -1269,7 +1606,7 @@ func (m model) View() string {
 		if m.pendingTemplate != "" {
 			title = "New Note from Template"
 		}
-		return lipgloss.Place(m.width, m.height,
+		mainView = lipgloss.Place(m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
 			inputStyle.Render(
 				fmt.Sprintf("%s\n\n%s", title, m.textInput.View()),
@@ -1277,7 +1614,7 @@ func (m model) View() string {
 		)
 
 	case stateConfirmDelete:
-		return lipgloss.Place(m.width, m.height,
+		mainView = lipgloss.Place(m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
 			inputStyle.Render(
 				fmt.Sprintf("Delete file?\n\n%s\n\n%s", filepath.Base(m.fileToDelete), m.deleteInput.View()),
@@ -1286,16 +1623,31 @@ func (m model) View() string {
 
 	default: // stateBrowser
 		if m.showHelp {
-			return lipgloss.JoinHorizontal(
+			mainView = lipgloss.JoinHorizontal(
 				lipgloss.Top,
 				listStyle.Width(m.listWidth).Render(m.fileList.View()),
 				previewStyle.Width(m.viewWidth).Render(helpStyle.Render(helpContent)),
 			)
+		} else {
+			// Use selection-highlighted viewport content
+			previewContent := m.renderViewportWithSelection()
+			mainView = lipgloss.JoinHorizontal(
+				lipgloss.Top,
+				listStyle.Width(m.listWidth).Render(m.fileList.View()),
+				// Removed .Width() constraint on previewStyle to prevent wrapping of existing content
+				previewStyle.Render(previewContent),
+			)
 		}
-		return lipgloss.JoinHorizontal(
-			lipgloss.Top,
-			listStyle.Width(m.listWidth).Render(m.fileList.View()),
-			previewStyle.Width(m.viewWidth).Render(m.viewport.View()),
+	}
+
+	// Overlay clipboard notification if present
+	if m.clipboardNotification != "" {
+		notification := notificationStyle.Render(m.clipboardNotification)
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Bottom,
+			lipgloss.JoinVertical(lipgloss.Center, mainView, notification),
 		)
 	}
+
+	return mainView
 }
