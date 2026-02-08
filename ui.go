@@ -649,7 +649,51 @@ func (m *model) updatePreview() tea.Cmd {
 	m.selectedFile = i.path
 
 	if i.isDir {
-		m.viewport.SetContent(infoStyle.Render(fmt.Sprintf("Directory:\n%s", i.path)))
+		entries, err := os.ReadDir(i.path)
+		if err != nil {
+			m.viewport.SetContent(infoStyle.Render(fmt.Sprintf("Directory: %s\n\nError reading directory: %v", i.path, err)))
+			return nil
+		}
+
+		var dirs, files []string
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() {
+				dirs = append(dirs, "📁 "+name)
+			} else {
+				files = append(files, "📄 "+name)
+			}
+		}
+
+		sort.Strings(dirs)
+		sort.Strings(files)
+
+		var content strings.Builder
+		content.WriteString(fmt.Sprintf("📂 Directory: %s\n\n", i.path))
+		content.WriteString(fmt.Sprintf("Items: %d\n\n", len(entries)))
+
+		if len(dirs) > 0 {
+			content.WriteString("Directories:\n")
+			for _, d := range dirs {
+				content.WriteString("  " + d + "\n")
+			}
+			if len(files) > 0 {
+				content.WriteString("\n")
+			}
+		}
+
+		if len(files) > 0 {
+			content.WriteString("Files:\n")
+			for _, f := range files {
+				content.WriteString("  " + f + "\n")
+			}
+		}
+
+		if len(entries) == 0 {
+			content.WriteString("(empty directory)")
+		}
+
+		m.viewport.SetContent(infoStyle.Render(content.String()))
 		return nil
 	}
 
