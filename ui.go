@@ -658,6 +658,10 @@ func (m *model) updatePreview() tea.Cmd {
 		var dirs, files []string
 		for _, entry := range entries {
 			name := entry.Name()
+			// Skip hidden files/dirs
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
 			if entry.IsDir() {
 				dirs = append(dirs, "📁 "+name)
 			} else {
@@ -670,7 +674,7 @@ func (m *model) updatePreview() tea.Cmd {
 
 		var content strings.Builder
 		content.WriteString(fmt.Sprintf("📂 Directory: %s\n\n", i.path))
-		content.WriteString(fmt.Sprintf("Items: %d\n\n", len(entries)))
+		content.WriteString(fmt.Sprintf("Items: %d\n\n", len(dirs)+len(files)))
 
 		if len(dirs) > 0 {
 			content.WriteString("Directories:\n")
