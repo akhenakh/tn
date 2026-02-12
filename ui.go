@@ -619,6 +619,10 @@ func (m *model) resetSelection() {
 	m.selEndY = 0
 }
 
+func setTerminalTitle(title string) {
+	fmt.Printf("\x1b]0;%s\x07", title)
+}
+
 func (m *model) updatePreview() tea.Cmd {
 	sel := m.fileList.SelectedItem()
 	if m.state == stateSearch {
@@ -649,6 +653,7 @@ func (m *model) updatePreview() tea.Cmd {
 	m.selectedFile = i.path
 
 	if i.isDir {
+		setTerminalTitle(i.title)
 		entries, err := os.ReadDir(i.path)
 		if err != nil {
 			m.viewport.SetContent(infoStyle.Render(fmt.Sprintf("Directory: %s\n\nError reading directory: %v", i.path, err)))
@@ -700,6 +705,8 @@ func (m *model) updatePreview() tea.Cmd {
 		m.viewport.SetContent(infoStyle.Render(content.String()))
 		return nil
 	}
+
+	setTerminalTitle(i.title)
 
 	if !isIndexable(i.path) {
 		m.viewport.SetContent(infoStyle.Render(fmt.Sprintf("%s\n\nNot a supported file type for preview.", filepath.Base(i.path))))
