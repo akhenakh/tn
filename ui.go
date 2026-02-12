@@ -982,13 +982,22 @@ func (m model) renderViewportWithSelection() string {
 	return strings.Join(highlightedLines, "\n")
 }
 
-func openEditor(path string) tea.Cmd {
+func openEditor(path, baseDir string) tea.Cmd {
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
 		editor = "vim"
 	}
-	log.Printf("Opening editor %s for file %s", editor, path)
-	c := exec.Command(editor, path)
+
+	// Calculate relative path from baseDir to the file
+	relPath, err := filepath.Rel(baseDir, path)
+	if err != nil {
+		// Fallback to absolute path if we can't get relative path
+		relPath = path
+	}
+
+	log.Printf("Opening editor %s for file %s (relative: %s) in directory %s", editor, path, relPath, baseDir)
+	c := exec.Command(editor, relPath)
+	c.Dir = baseDir // Set working directory to baseDir
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		return editorFinishedMsg{err}
 	})
@@ -1335,7 +1344,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					} else {
 						m.fileList.ResetFilter()
-						return m, openEditor(i.path)
+						return m, openEditor(i.path, m.config.BaseDoc)
 					}
 				}
 			case "l", "right":
@@ -1355,7 +1364,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					} else {
 						m.fileList.ResetFilter()
-						return m, openEditor(i.path)
+						return m, openEditor(i.path, m.config.BaseDoc)
 					}
 				}
 			case "left", "h":
@@ -1455,7 +1464,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				m.state = stateBrowser
 				// Refresh list and open editor
-				return m, tea.Batch(m.refreshFileListCmd(m.currentDir), openEditor(fullPath))
+				return m, tea.Batch(m.refreshFileListCmd(m.currentDir), openEditor(fullPath, m.config.BaseDoc))
 			case tea.KeyEsc:
 				m.state = stateBrowser
 				m.textInput.Blur()
