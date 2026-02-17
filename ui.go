@@ -154,7 +154,7 @@ Search Mode:
   d              Delete file
   esc            Exit search mode
   Enter          Open selected search result
-  ↑/↓, j/k       Navigate search results
+  ↑/↓            Navigate search results
   ctrl+y         Copy entire file to clipboard
 
 Template Selection:
@@ -1564,8 +1564,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.deleteInput.SetValue("")
 					return m, textinput.Blink
 				}
-			case "up", "k", "down", "j":
-				// Handle navigation in the list even if input is focused
+			case "up", "down":
+				// Handle navigation in the list
 				m.searchList, cmd = m.searchList.Update(msg)
 				cmds = append(cmds, cmd)
 
