@@ -542,10 +542,7 @@ func (m model) searchCmd(query string, width int) tea.Cmd {
 
 		// Calculate strict text limits based on width to prevent wrapping
 		// We account for list padding/borders (approx 6 chars safety)
-		safeWidth := width - 6
-		if safeWidth < 10 {
-			safeWidth = 10
-		}
+		safeWidth := max(width-6, 10)
 
 		var items []list.Item
 		for rows.Next() {
@@ -884,10 +881,7 @@ func getSelectedText(viewportContent string, startY, endY int) string {
 // isInPreviewPane checks if the given coordinates are within the preview pane
 func (m model) isInPreviewPane(x, y int) bool {
 	// Calculate the left edge of the preview pane
-	listOuterWidth := int(float64(m.width) * 0.30)
-	if listOuterWidth < 20 {
-		listOuterWidth = 20
-	}
+	listOuterWidth := max(int(float64(m.width)*0.30), 20)
 
 	// Check if x is within the preview pane
 	// Preview pane starts at listOuterWidth and goes to m.width
@@ -912,18 +906,12 @@ func (m model) screenToViewport(screenX, screenY int) (contentY int) {
 	// Top border takes 1 line. Top padding is 0.
 	// Offset = 1
 	const offset = 1
-	contentY = screenY - offset
-	if contentY < 0 {
-		contentY = 0
-	}
+	contentY = max(screenY-offset, 0)
 
 	// Get visible viewport lines to clamp to valid range
 	visibleLines := strings.Split(m.viewport.View(), "\n")
 	if contentY >= len(visibleLines) {
-		contentY = len(visibleLines) - 1
-		if contentY < 0 {
-			contentY = 0
-		}
+		contentY = max(len(visibleLines)-1, 0)
 	}
 
 	return contentY
@@ -1047,10 +1035,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Calculate exact widths
 		// 1. List is strictly 30% of total width
-		listOuterWidth := int(float64(msg.Width) * 0.30)
-		if listOuterWidth < 20 {
-			listOuterWidth = 20
-		}
+		listOuterWidth := max(int(float64(msg.Width)*0.30), 20)
 
 		// 2. Preview takes the remaining width
 		previewOuterWidth := msg.Width - listOuterWidth
@@ -1096,11 +1081,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Calculate remaining height for the list component content.
 		// Total Window Height - Input Box Height - List Container Borders
 		// We subtract 1 line to ensure we don't hit the absolute edge of the terminal, causing scroll.
-		searchHeight := msg.Height - inputBoxHeight - listFrameHeight - 1
-
-		if searchHeight < 0 {
-			searchHeight = 0
-		}
+		searchHeight := max(msg.Height-inputBoxHeight-listFrameHeight-1, 0)
 		m.searchListHeight = searchHeight
 		m.searchList.SetSize(m.listWidth, m.searchListHeight)
 

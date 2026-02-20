@@ -18,6 +18,7 @@ type Config struct {
 	DbPath       string
 }
 
+// loadConfig loads the application configuration from the user's home directory. If no config file exists, default directories are created.
 func loadConfig() (Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
