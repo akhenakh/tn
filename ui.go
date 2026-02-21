@@ -260,6 +260,7 @@ type model struct {
 	inputWidth       int    // Calculated inner width for input
 	searchListHeight int    // Calculated height for search list content
 	fileToSelect     string // Track file to select after directory refresh
+	editingFilePath  string // Track file being edited in external editor
 	previewLoading   bool   // Track if preview is being rendered
 	renderID         int    // Incremental ID to track current render request
 	showHelp         bool   // Track if help is being shown
@@ -1174,6 +1175,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			log.Println("Editor finished with error:", msg.err)
 		}
+		// Select the file that was just edited
+		if m.editingFilePath != "" {
+			m.fileToSelect = m.editingFilePath
+			m.selectedFile = m.editingFilePath
+			m.editingFilePath = ""
+		}
 		// Re-read file list just in case names changed
 		cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
 		// Re-index the specific file that was edited
@@ -1332,6 +1339,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					} else {
 						m.fileList.ResetFilter()
+						m.editingFilePath = i.path
 						return m, openEditor(i.path, m.config.BaseDoc)
 					}
 				}
@@ -1352,6 +1360,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					} else {
 						m.fileList.ResetFilter()
+						m.editingFilePath = i.path
 						return m, openEditor(i.path, m.config.BaseDoc)
 					}
 				}
@@ -1451,6 +1460,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = os.WriteFile(fullPath, content, 0644)
 
 				m.state = stateBrowser
+				m.editingFilePath = fullPath
 				// Refresh list and open editor
 				return m, tea.Batch(m.refreshFileListCmd(m.currentDir), openEditor(fullPath, m.config.BaseDoc))
 			case tea.KeyEsc:
