@@ -1178,13 +1178,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Select the file that was just edited
 		if m.editingFilePath != "" {
 			m.fileToSelect = m.editingFilePath
-			m.selectedFile = m.editingFilePath
+			// Clear selectedFile to force preview re-render after edit
+			m.selectedFile = ""
+			// Re-index the specific file that was edited
+			cmds = append(cmds, m.reindexFileCmd(m.editingFilePath))
 			m.editingFilePath = ""
 		}
 		// Re-read file list just in case names changed
 		cmds = append(cmds, m.refreshFileListCmd(m.currentDir))
-		// Re-index the specific file that was edited
-		cmds = append(cmds, m.reindexFileCmd(m.selectedFile))
 		cmd = m.updatePreview()
 		if cmd != nil {
 			cmds = append(cmds, cmd)
