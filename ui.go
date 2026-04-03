@@ -828,16 +828,30 @@ func highlightMatches(text, query string) string {
 		return text
 	}
 
-	// Escape special regex characters
-	escapedQuery := regexp.QuoteMeta(query)
+	// Split query into individual words for separate highlighting
+	words := strings.Fields(query)
+	if len(words) == 0 {
+		return text
+	}
 
-	// Create case-insensitive regex pattern
-	pattern := "(?i)(" + escapedQuery + ")"
-	re := regexp.MustCompile(pattern)
+	result := text
+	for _, word := range words {
+		if word == "" {
+			continue
+		}
+		// Escape special regex characters
+		escapedWord := regexp.QuoteMeta(word)
 
-	// Highlight matches with ANSI escape codes for red background
-	// Red background (41) with white text (37)
-	return re.ReplaceAllString(text, "\x1b[37;41m$1\x1b[0m")
+		// Create case-insensitive regex pattern
+		pattern := "(?i)(" + escapedWord + ")"
+		re := regexp.MustCompile(pattern)
+
+		// Highlight matches with ANSI escape codes
+		// Red background (41) with white text (37)
+		result = re.ReplaceAllString(result, "\x1b[37;41m$1\x1b[0m")
+	}
+
+	return result
 }
 
 // stripANSI removes ANSI escape codes from text
