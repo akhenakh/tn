@@ -24,55 +24,14 @@ The `sqlite_fts5` tag is required to enable full-text search capabilities.
 2. Build with the command above
 3. Run `./tn` or move the binary to your `$PATH`
 
-### Desktop Shortcut (Linux)
-
-To create a desktop shortcut that opens TN in your default terminal:
-
-**KDE Plasma:**
-
-Create `~/.local/share/applications/tn.desktop`:
-
-```ini
-[Desktop Entry]
-Name=TN Notes
-Comment=Terminal Note Manager
-Exec=konsole -e tn
-Type=Application
-Terminal=false
-Icon=utilities-terminal
-Categories=Office;TextEditor;
-```
-
-**GNOME:**
-
-Create `~/.local/share/applications/tn.desktop`:
-
-```ini
-[Desktop Entry]
-Name=TN Notes
-Comment=Terminal Note Manager
-Exec=gnome-terminal -- tn
-Type=Application
-Terminal=false
-Icon=utilities-terminal
-Categories=Office;TextEditor;
-```
-
-After creating the file, refresh the application menu:
-
-```sh
-update-desktop-database ~/.local/share/applications/
-```
-
-The shortcut will appear in your application menu. You can also pin it to your taskbar/panel.
 
 ## Configuration
 
 Configuration is stored in `~/.config/tn/config.yaml`:
 
 ```yaml
-base_doc: ~/Documents/Obsidian        # Root directory for your notes
-templates_dir: ~/.config/tn/templates # Directory for note templates
+base_doc: /home/user/Documents/Obsidian        # Root directory for your notes
+templates_dir: /home/user/.config/tn/templates # Directory for note templates
 ```
 
 The application creates this config directory automatically on first run with sensible defaults.
@@ -159,6 +118,48 @@ Run `tn` to start the application:
 - **Templates**: `~/.config/tn/templates/` (copy examples from `templates/`)
 
 The database maintains an index of all markdown files for fast searching. It automatically re-indexes files when they change.
+
+### Desktop Shortcut (Linux)
+
+To create a desktop shortcut that opens TN in your default terminal:
+
+**KDE Plasma:**
+
+Create `~/.local/share/applications/tn.desktop`:
+
+```ini
+[Desktop Entry]
+Name=TN Notes
+Comment=Terminal Note Manager
+Exec=konsole -e tn
+Type=Application
+Terminal=false
+Icon=utilities-terminal
+Categories=Office;TextEditor;
+```
+
+**GNOME:**
+
+Create `~/.local/share/applications/tn.desktop`:
+
+```ini
+[Desktop Entry]
+Name=TN Notes
+Comment=Terminal Note Manager
+Exec=gnome-terminal -- tn
+Type=Application
+Terminal=false
+Icon=utilities-terminal
+Categories=Office;TextEditor;
+```
+
+After creating the file, refresh the application menu:
+
+```sh
+update-desktop-database ~/.local/share/applications/
+```
+
+The shortcut will appear in your application menu. You can also pin it to your taskbar/panel.
 
 ## Dependencies
 
